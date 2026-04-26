@@ -1,0 +1,14 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: queuehouse
+      POSTGRES_PASSWORD: queuehouse
+      POSTGRES_DB: queuehouse
+    ports:
+      - "5432:5432"

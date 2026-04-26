@@ -1,0 +1,19 @@
+{
+  "name": "@queuehouse/worker",
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/worker.ts",
+    "start": "bun run src/worker.ts",
+    "build": "bun build src/worker.ts --outdir dist --target bun",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@queuehouse/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.3"
+  }
+}
