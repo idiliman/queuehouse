@@ -9,6 +9,7 @@ import { Queue } from "bullmq";
 import { exampleSuccessJob, bullmqPrefix } from "@queuehouse/core";
 import { prisma } from "@queuehouse/db";
 import { getOrCreateQueue } from "../src/bullmq/queuehouse-queue";
+import { reconcileAllEnabledJobSchedules } from "../src/bullmq/job-schedules";
 import type { ApiVariables } from "../src/api-types";
 
 const repoRoot = path.join(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -152,5 +153,80 @@ integrationDescribe("Job schedules (integration)", () => {
     expect(del.status).toBe(204);
     const after = await q.getJobScheduler(sid);
     expect(after).toBeUndefined();
+  });
+
+  it("reconcile marks schema mismatch as needs review and removes Bull scheduler; PATCH recovers", async () => {
+    const password = await Bun.password.hash("sched-mismatch!", { algorithm: "bcrypt" });
+    await prisma.user.deleteMany();
+    const admin = await prisma.user.create({
+      data: {
+        email: "schedmismatch@example.com",
+        passwordHash: password,
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: admin.email, password: "sched-mismatch!" }),
+    });
+    const cookie = login.headers.getSetCookie().map((c) => c.split(";")[0]!.trim());
+    const cookieHeader = cookie.join("; ");
+
+    const create = await app.request("/api/v1/schedules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookieHeader },
+      body: JSON.stringify({
+        jobName: "example.success",
+        cronPattern: "20 3 * * *",
+        timeZone: "UTC",
+        payload: { message: "mismatch test" },
+        enabled: true,
+      }),
+    });
+    expect(create.status).toBe(200);
+    const createBody = (await create.json()) as { schedule: { id: string } };
+    const sid = createBody.schedule.id;
+
+    const apiConfig = (await import("../src/config")).config;
+    const q = getOrCreateQueue(redis, apiConfig, exampleSuccessJob.queue);
+    expect(await q.getJobScheduler(sid)).toBeDefined();
+
+    await prisma.jobSchedule.update({
+      where: { id: sid },
+      data: { schemaVersion: 999 },
+    });
+
+    const stale = await prisma.jobSchedule.findUniqueOrThrow({ where: { id: sid } });
+    await reconcileAllEnabledJobSchedules(redis, apiConfig, [stale]);
+
+    const rowAfter = await prisma.jobSchedule.findUniqueOrThrow({ where: { id: sid } });
+    expect(rowAfter.needsReview).toBe(true);
+    expect(rowAfter.needsReviewReason).toBe("schema_version_mismatch");
+    expect(await q.getJobScheduler(sid)).toBeUndefined();
+
+    const list = await app.request("/api/v1/schedules", {
+      headers: { Cookie: cookieHeader },
+    });
+    expect(list.status).toBe(200);
+    const listBody = (await list.json()) as {
+      schedules: { id: string; needsReview: boolean; nextRun: string | null }[];
+    };
+    const listed = listBody.schedules.find((s) => s.id === sid);
+    expect(listed?.needsReview).toBe(true);
+    expect(listed?.nextRun).toBeNull();
+
+    const recover = await app.request(`/api/v1/schedules/${sid}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookieHeader },
+      body: JSON.stringify({
+        payload: { message: "mismatch test" },
+      }),
+    });
+    expect(recover.status).toBe(200);
+    const recoveredRow = await prisma.jobSchedule.findUniqueOrThrow({ where: { id: sid } });
+    expect(recoveredRow.needsReview).toBe(false);
+    expect(recoveredRow.schemaVersion).toBe(1);
+    expect(await q.getJobScheduler(sid)).toBeDefined();
   });
 });

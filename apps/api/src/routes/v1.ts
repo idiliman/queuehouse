@@ -972,9 +972,10 @@ v1.get("/schedules", async (c) => {
   const redis = getQueuehouseRedis(config);
   const schedules = await Promise.all(
     rows.map(async (r) => {
-      const nextRunMs = r.enabled
-        ? await getNextRunForSchedule(redis, config, r.jobName, r.id)
-        : null;
+      const nextRunMs =
+        r.enabled && !r.needsReview
+          ? await getNextRunForSchedule(redis, config, r.jobName, r.id)
+          : null;
       return {
         id: r.id,
         jobName: r.jobName,
@@ -985,6 +986,8 @@ v1.get("/schedules", async (c) => {
         priority: r.priority,
         retryOverride: r.retryOverride,
         schemaVersion: r.schemaVersion,
+        needsReview: r.needsReview,
+        needsReviewReason: r.needsReviewReason,
         createdAt: r.createdAt.toISOString(),
         updatedAt: r.updatedAt.toISOString(),
         nextRunMs,
@@ -1090,6 +1093,8 @@ v1.post("/schedules", async (c) => {
       priority: created.priority,
       retryOverride: created.retryOverride,
       schemaVersion: created.schemaVersion,
+      needsReview: created.needsReview,
+      needsReviewReason: created.needsReviewReason,
       createdAt: created.createdAt.toISOString(),
       updatedAt: created.updatedAt.toISOString(),
     },
@@ -1159,7 +1164,6 @@ v1.patch("/schedules/:id", async (c) => {
   const patchData: Prisma.JobScheduleUpdateInput = {};
   if (body.jobName !== undefined) {
     patchData.jobName = body.jobName;
-    patchData.schemaVersion = reg.schemaVersion;
   }
   if (body.cronPattern !== undefined) {
     patchData.cronPattern = body.cronPattern;
@@ -1180,6 +1184,9 @@ v1.patch("/schedules/:id", async (c) => {
     patchData.retryOverride =
       body.retry === null ? Prisma.DbNull : (body.retry as Prisma.InputJsonValue);
   }
+  patchData.schemaVersion = reg.schemaVersion;
+  patchData.needsReview = false;
+  patchData.needsReviewReason = null;
   let didUpdate = false;
   try {
     const updated = await prisma.jobSchedule.update({
@@ -1205,6 +1212,8 @@ v1.patch("/schedules/:id", async (c) => {
                 ? Prisma.DbNull
                 : (before.retryOverride as Prisma.InputJsonValue),
             schemaVersion: before.schemaVersion,
+            needsReview: before.needsReview,
+            needsReviewReason: before.needsReviewReason,
           },
         });
       } catch {
@@ -1254,6 +1263,8 @@ v1.patch("/schedules/:id", async (c) => {
       priority: after.priority,
       retryOverride: after.retryOverride,
       schemaVersion: after.schemaVersion,
+      needsReview: after.needsReview,
+      needsReviewReason: after.needsReviewReason,
       createdAt: after.createdAt.toISOString(),
       updatedAt: after.updatedAt.toISOString(),
     },

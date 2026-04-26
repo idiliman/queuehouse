@@ -97,8 +97,11 @@ model JobSchedule {
   priority      Int?
   /// Optional { maxAttempts?, backoffMs? } — merged with registry bounds like manual enqueue.
   retryOverride Json?
-  /// Job definition schemaVersion at save time (for future mismatch checks; issue #15).
+  /// Job definition schemaVersion at save time (for mismatch checks vs registry).
   schemaVersion Int      @default(1)
+  /// Registry no longer matches this row; Bull scheduler removed until an admin saves a valid update.
+  needsReview        Boolean  @default(false)
+  needsReviewReason  String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }

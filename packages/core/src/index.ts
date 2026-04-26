@@ -28,6 +28,8 @@ export {
   mergePayloadWithRetryForEnqueue,
   resolveManualEnqueueDelayMs,
   getRegisteredJob,
+  getJobScheduleSyncBlocker,
+  JOB_SCHEDULE_SYNC_BLOCKER,
   isJobUnrecoverableError,
   listRegisteredJobs,
   queueJobDataSchema,
@@ -43,6 +45,8 @@ export {
   type JobRetryDefaults,
   type JobRetryNumericBounds,
   type JobRetryOverrideBounds,
+  type JobScheduleSyncBlocker,
+  type JobScheduleSyncInput,
   type QueueJobData,
   type RegisteredJob,
 } from "./jobs";

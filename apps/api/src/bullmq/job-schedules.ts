@@ -1,6 +1,8 @@
 import type { JobSchedule } from "@prisma/client";
+import { prisma } from "@queuehouse/db";
 import type IORedis from "ioredis";
 import {
+  getJobScheduleSyncBlocker,
   getRegisteredJob,
   JOB_CAPABILITY,
   mergePayloadWithRetryForEnqueue,
@@ -48,6 +50,10 @@ export async function syncJobScheduleToBull(
   const job = assertSchedulableJob(row.jobName);
   const queue = getOrCreateQueue(redis, config, job.queue);
   if (!row.enabled) {
+    await queue.removeJobScheduler(row.id);
+    return;
+  }
+  if (row.needsReview) {
     await queue.removeJobScheduler(row.id);
     return;
   }
@@ -102,6 +108,24 @@ export async function reconcileAllEnabledJobSchedules(
 ): Promise<void> {
   for (const row of rows) {
     if (!row.enabled) continue;
+    if (row.needsReview) {
+      await removeJobScheduleFromBull(redis, config, row.jobName, row.id);
+      continue;
+    }
+    const blocker = getJobScheduleSyncBlocker({
+      jobName: row.jobName,
+      schemaVersion: row.schemaVersion,
+      payload: row.payload,
+      retryOverride: row.retryOverride,
+    });
+    if (blocker) {
+      await removeJobScheduleFromBull(redis, config, row.jobName, row.id);
+      await prisma.jobSchedule.update({
+        where: { id: row.id },
+        data: { needsReview: true, needsReviewReason: blocker },
+      });
+      continue;
+    }
     await syncJobScheduleToBull(redis, config, row);
   }
 }

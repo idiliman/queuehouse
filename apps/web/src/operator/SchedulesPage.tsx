@@ -17,6 +17,8 @@ type ScheduleRow = {
   priority: number | null;
   retryOverride: unknown;
   schemaVersion: number;
+  needsReview: boolean;
+  needsReviewReason: string | null;
   createdAt: string;
   updatedAt: string;
   nextRunMs: number | null;
@@ -273,6 +275,7 @@ export function SchedulesPage() {
                       <th style={thtd}>Cron</th>
                       <th style={thtd}>Time zone</th>
                       <th style={thtd}>On</th>
+                      <th style={thtd}>Review</th>
                       <th style={thtd}>Next run</th>
                       <th style={thtd}></th>
                     </tr>
@@ -288,6 +291,18 @@ export function SchedulesPage() {
                         </td>
                         <td style={thtd}>{r.timeZone}</td>
                         <td style={thtd}>{r.enabled ? "yes" : "no"}</td>
+                        <td style={thtd}>
+                          {r.needsReview ? (
+                            <span
+                              title={r.needsReviewReason ?? "Registry mismatch or invalid payload"}
+                              style={{ color: "#b42318", fontWeight: 600 }}
+                            >
+                              needs review
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
                         <td style={thtd}>{r.nextRun ? <span title={r.nextRun}>{r.nextRun}</span> : "—"}</td>
                         <td style={thtd}>
                           <button type="button" onClick={() => fillFromRow(r)} style={linkBtn} disabled={busy}>

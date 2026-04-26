@@ -28,6 +28,12 @@ export {
   listRegisteredJobs,
   registerJob,
 } from "./registry";
+export {
+  getJobScheduleSyncBlocker,
+  JOB_SCHEDULE_SYNC_BLOCKER,
+  type JobScheduleSyncBlocker,
+  type JobScheduleSyncInput,
+} from "./schedule-sync";
 export { JOB_CAPABILITY, type JobCapability, type RegisteredJob } from "./types";
 export {
   MANUAL_ENQUEUE_LIMITS,
