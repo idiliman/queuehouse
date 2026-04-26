@@ -18,18 +18,45 @@ function hasEnqueueApi(job: { capabilities: readonly string[] }): boolean {
   return job.capabilities.includes(JOB_CAPABILITY.ENQUEUE_API);
 }
 
+/** OpenAPI field docs for per-job enqueue `retry` when the job declares `retryOverrides`. */
+function retryOverrideRequestSchema(job: RegisteredJob): z.ZodTypeAny {
+  const bounds = job.retryOverrides!;
+  const ma = bounds.maxAttempts;
+  const bo = bounds.backoffMs;
+  return z
+    .object({
+      maxAttempts: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          ma
+            ? `Optional BullMQ attempt budget for this enqueue only (inclusive ${ma.min}–${ma.max}). Omitted: merged from registry defaults.`
+            : "Optional maxAttempts override.",
+        ),
+      backoffMs: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          bo
+            ? `Optional base backoff in ms (inclusive ${bo.min}–${bo.max}). Omitted: merged from registry defaults.`
+            : "Optional backoffMs override.",
+        ),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "Per-request retry overrides merged with this job's registry defaults; values outside the ranges above return 400 `retry_override_out_of_range`. " +
+        "Other cases: `retry_override_not_allowed` (field present but job disallows overrides), `retry_override_invalid` (bad shape).",
+    );
+}
+
 function jobEnqueueRequestSchema(job: RegisteredJob): z.ZodTypeAny {
   const input = job.inputSchema as unknown as z.ZodTypeAny;
   if (job.retryOverrides && input instanceof z.ZodObject) {
-    const retryField = z
-      .object({
-        maxAttempts: z.number().int().optional(),
-        backoffMs: z.number().int().optional(),
-      })
-      .strict()
-      .optional();
     return (input as { merge: (s: z.ZodTypeAny) => z.ZodTypeAny }).merge(
-      z.object({ retry: retryField }),
+      z.object({ retry: retryOverrideRequestSchema(job) }),
     );
   }
   return input;
@@ -55,11 +82,28 @@ const genericEnqueueBody = z.object({
     .describe("JSON payload; must match the target job input schema."),
   retry: z
     .object({
-      maxAttempts: z.number().int().optional(),
-      backoffMs: z.number().int().optional(),
+      maxAttempts: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Optional BullMQ attempt budget override; allowed range is defined per job in the registry (typical jobs: 1–10).",
+        ),
+      backoffMs: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "Optional base backoff in ms; allowed range is defined per job when overrides are supported.",
+        ),
     })
     .strict()
-    .optional(),
+    .optional()
+    .describe(
+      "Per-request retry overrides for the target job. Only jobs with `retryOverrides` accept this; others return 400 `retry_override_not_allowed`. " +
+        "For object payloads, prefer top-level `retry` on per-job routes; for the generic route it is merged into the payload. " +
+        "Out-of-range values → `retry_override_out_of_range`; non-object payload with retry → `retry_with_non_object_payload`.",
+    ),
 });
 
 const enqueueAccepted = z.object({
@@ -154,7 +198,8 @@ export function createApiDocsApp(
           content: { "application/json": { schema: enqueueAccepted } },
         },
         400: {
-          description: "Invalid payload or unknown job",
+          description:
+            "Invalid payload, validation, or retry override (see `error`: `retry_override_*`, `retry_with_non_object_payload`)",
           content: { "application/json": { schema: enqueueClientError } },
         },
         403: {
@@ -237,7 +282,8 @@ export function createApiDocsApp(
         content: { "application/json": { schema: enqueueAccepted } },
       },
       400: {
-        description: "Invalid payload or unknown job",
+        description:
+          "Invalid payload, validation, or retry override (see `error`: `retry_override_*`, `retry_with_non_object_payload`)",
         content: { "application/json": { schema: enqueueClientError } },
       },
       403: {
