@@ -1,0 +1,31 @@
+# Isolated Postgres + Redis on alternate ports for integration / E2E on the host.
+# Example:
+#   docker compose -f compose.test.yaml up -d
+#   export DATABASE_URL=postgresql://queuehouse:queuehouse@127.0.0.1:5433/queuehouse
+#   export REDIS_URL=redis://127.0.0.1:6380
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: queuehouse
+      POSTGRES_PASSWORD: queuehouse
+      POSTGRES_DB: queuehouse
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queuehouse -d queuehouse"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

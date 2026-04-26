@@ -1,0 +1,76 @@
+# Production-like stack: API + worker + Postgres + Redis.
+# Migrations and admin bootstrap are explicit one-off commands (see DEPLOY.md).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: qh
+      POSTGRES_PASSWORD: qh_local_deploy_secret
+      POSTGRES_DB: queuehouse
+    volumes:
+      - queuehouse_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qh -d queuehouse"]
+      interval: 3s
+      timeout: 3s
+      retries: 25
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 25
+
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: postgresql://qh:qh_local_deploy_secret@postgres:5432/queuehouse
+      REDIS_URL: redis://redis:6379
+      # Replace for real deployments (32+ chars, high entropy). Used only by the API.
+      SESSION_SECRET: e8b3c5d7f1a2946b0c8e7d6f5a4b3c2918765432fedcba0987654321abcd
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://127.0.0.1:'+(process.env.PORT||'3000')+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://qh:qh_local_deploy_secret@postgres:5432/queuehouse
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "run", "src/healthcheck.ts"]
+      working_dir: /app/apps/worker
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  queuehouse_pg:

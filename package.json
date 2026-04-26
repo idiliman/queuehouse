@@ -8,7 +8,8 @@
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "check": "turbo run build typecheck test",
-    "test:e2e": "turbo run test:e2e --filter=@queuehouse/web"
+    "test:e2e": "turbo run test:e2e --filter=@queuehouse/web",
+    "docker:build": "docker build -t queuehouse ."
   },
   "devDependencies": {
     "turbo": "^2.4.4",

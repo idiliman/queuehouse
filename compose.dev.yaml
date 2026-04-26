@@ -1,0 +1,34 @@
+# Local dependencies only: run Postgres and Redis, then start API/worker/web on the host with `bun`.
+# Example:
+#   docker compose -f compose.dev.yaml up -d
+#   cp .env.example .env   # point DATABASE_URL / REDIS_URL at localhost
+#   bun install && (cd packages/db && bunx prisma migrate deploy) && …
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: queuehouse
+      POSTGRES_PASSWORD: queuehouse
+      POSTGRES_DB: queuehouse
+    ports:
+      - "5432:5432"
+    volumes:
+      - queuehouse_dev_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queuehouse -d queuehouse"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  queuehouse_dev_pg:
