@@ -39,8 +39,17 @@ const inputStyle: CSSProperties = {
   minWidth: 0,
 };
 
+function initialJobsPrefsFromLocation(): JobsTablePrefs {
+  const base = loadJobsTablePrefs();
+  if (typeof window === "undefined") return base;
+  const u = new URLSearchParams(window.location.search);
+  const st = u.get("state");
+  if (st) return { ...base, state: st };
+  return base;
+}
+
 export function JobsTablePage() {
-  const [prefs, setPrefs] = useState<JobsTablePrefs>(() => loadJobsTablePrefs());
+  const [prefs, setPrefs] = useState<JobsTablePrefs>(() => initialJobsPrefsFromLocation());
   const [rows, setRows] = useState<JobListItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);

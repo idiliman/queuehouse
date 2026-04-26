@@ -1,9 +1,12 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import {
   clearJobRegistryForTests,
+  exampleDlqJob,
   exampleFailJob,
   exampleProgressJob,
   exampleSuccessJob,
+  isJobUnrecoverableError,
+  JobUnrecoverableError,
   registerExampleJobs,
   runExampleJobSync,
 } from "../../src/jobs";
@@ -34,5 +37,16 @@ describe("example jobs", () => {
   it("example.fail throws after validating input", () => {
     expect(() => runExampleJobSync(exampleFailJob, {})).toThrow(/intentional failure/);
     expect(() => runExampleJobSync(exampleFailJob, { errorMessage: "boom" })).toThrow(/boom/);
+  });
+
+  it("example.dlq throws retryable or unrecoverable", () => {
+    expect(() => runExampleJobSync(exampleDlqJob, {})).toThrow(/intentional failure/);
+    try {
+      runExampleJobSync(exampleDlqJob, { unrecoverable: true });
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(JobUnrecoverableError);
+      expect(isJobUnrecoverableError(e)).toBe(true);
+    }
   });
 });

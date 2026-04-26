@@ -1,11 +1,12 @@
 import {
   bullmqPrefix,
+  isJobUnrecoverableError,
   listRegisteredJobs,
   loadConfig,
   QUEUEHOUSE_VERSION,
   runJobFromQueueData,
 } from "@queuehouse/core";
-import { Worker } from "bullmq";
+import { UnrecoverableError, Worker } from "bullmq";
 import IORedis from "ioredis";
 
 const config = loadConfig(process.env, {
@@ -22,7 +23,14 @@ const workers = uniqueQueues.map(
     new Worker(
       queueName,
       async (job) => {
-        return runJobFromQueueData(job.data);
+        try {
+          return runJobFromQueueData(job.data);
+        } catch (e) {
+          if (isJobUnrecoverableError(e)) {
+            throw new UnrecoverableError(e.message);
+          }
+          throw e;
+        }
       },
       { connection, prefix, concurrency: 5 },
     ),

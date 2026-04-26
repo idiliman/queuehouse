@@ -2,6 +2,7 @@ import { Queue, type Job, type JobType } from "bullmq";
 import type IORedis from "ioredis";
 import {
   bullmqPrefix,
+  getEffectiveRetryOptions,
   getRegisteredJob,
   JOB_CAPABILITY,
   listRegisteredJobs,
@@ -58,6 +59,7 @@ export async function enqueueAuthenticatedJob(
   }
   job.inputSchema.parse(params.payload);
 
+  const eff = getEffectiveRetryOptions(job);
   const queue = getOrCreateQueue(redis, config, job.queue);
   const bullJob = await queue.add(
     params.jobName,
@@ -68,9 +70,9 @@ export async function enqueueAuthenticatedJob(
       enqueuedBy: { userId: params.user.id, role: params.user.role },
     },
     {
-      attempts: job.retry.maxAttempts ?? 1,
-      backoff: job.retry.backoffMs
-        ? { type: "fixed" as const, delay: job.retry.backoffMs }
+      attempts: eff.maxAttempts,
+      backoff: eff.backoffMs
+        ? { type: "fixed" as const, delay: eff.backoffMs }
         : undefined,
       removeOnComplete: { count: 10_000 },
       removeOnFail: false,
@@ -254,6 +256,8 @@ export type JobDetailResult = {
   };
   timestamps: { created?: number; processed?: number; finished?: number };
   requestId?: string;
+  /** Registry retry policy for the job type; omitted when `jobName` is unknown. */
+  resolvedRetry?: { maxAttempts: number; backoffMs?: number };
 };
 
 export async function getJobDetail(
@@ -277,6 +281,8 @@ export async function getJobDetail(
     data.payload,
     job.returnvalue,
   );
+  const reg = data.jobName ? getRegisteredJob(data.jobName) : undefined;
+  const resolvedRetry = reg ? getEffectiveRetryOptions(reg) : undefined;
   let logs: string[] = [];
   try {
     const logRes = await queue.getJobLogs(jobId, 0, 199, true);
@@ -311,5 +317,54 @@ export async function getJobDetail(
       finished: job.finishedOn ?? undefined,
     },
     requestId: data.requestId,
+    resolvedRetry,
   };
+}
+
+/**
+ * Retry a failed job in place (BullMQ moves it back to waiting). Admin-only at route layer.
+ */
+export async function retryFailedJobInPlace(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  queueName: string,
+  jobId: string,
+): Promise<{ ok: true } | { error: "job_not_found" | "forbidden_queue" | "invalid_state" }> {
+  const regQueues = new Set(listRegisteredJobs().map((j) => j.queue));
+  if (!regQueues.has(queueName)) {
+    return { error: "forbidden_queue" };
+  }
+  const queue = getOrCreateQueue(redis, config, queueName);
+  const job: Job | undefined = await queue.getJob(jobId);
+  if (!job) return { error: "job_not_found" };
+  const state = await job.getState();
+  if (state !== "failed") {
+    return { error: "invalid_state" };
+  }
+  await job.retry("failed");
+  return { ok: true };
+}
+
+/**
+ * Remove a failed job from Redis. Admin-only at route layer.
+ */
+export async function removeFailedJob(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  queueName: string,
+  jobId: string,
+): Promise<{ ok: true } | { error: "job_not_found" | "forbidden_queue" | "invalid_state" }> {
+  const regQueues = new Set(listRegisteredJobs().map((j) => j.queue));
+  if (!regQueues.has(queueName)) {
+    return { error: "forbidden_queue" };
+  }
+  const queue = getOrCreateQueue(redis, config, queueName);
+  const job: Job | undefined = await queue.getJob(jobId);
+  if (!job) return { error: "job_not_found" };
+  const state = await job.getState();
+  if (state !== "failed") {
+    return { error: "invalid_state" };
+  }
+  await job.remove();
+  return { ok: true };
 }

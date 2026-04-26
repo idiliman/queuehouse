@@ -1,6 +1,8 @@
+import { JobUnrecoverableError } from "./job-errors";
 import type { RegisteredJob } from "./types";
 import {
   exampleDeprecatedJob,
+  exampleDlqJob,
   exampleFailJob,
   exampleProgressJob,
   exampleSuccessJob,
@@ -33,6 +35,17 @@ export function runExampleJobSync(job: RegisteredJob, rawInput: unknown): unknow
 
   if (job.name === exampleFailJob.name) {
     const { errorMessage } = input as { errorMessage?: string };
+    throw new Error(errorMessage ?? "intentional failure");
+  }
+
+  if (job.name === exampleDlqJob.name) {
+    const { errorMessage, unrecoverable } = input as {
+      errorMessage?: string;
+      unrecoverable?: boolean;
+    };
+    if (unrecoverable) {
+      throw new JobUnrecoverableError(errorMessage ?? "unrecoverable");
+    }
     throw new Error(errorMessage ?? "intentional failure");
   }
 

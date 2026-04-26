@@ -15,6 +15,7 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import {
   bullmqPrefix,
+  exampleDlqJob,
   exampleSuccessJob,
   loadConfig,
   runJobFromQueueData,
@@ -167,7 +168,7 @@ integrationDescribe("Enqueue through worker (integration)", () => {
       expect(res.status).toBe(200);
       detail = (await res.json()) as Record<string, unknown>;
       lastState = String(detail.state);
-      if (lastState === "completed") break;
+      if (lastState === "completed" && detail.result != null) break;
       if (lastState === "failed") {
         throw new Error(`job failed: ${JSON.stringify(detail)}`);
       }
@@ -198,5 +199,198 @@ integrationDescribe("Enqueue through worker (integration)", () => {
       body: JSON.stringify({ message: "x" }),
     });
     expect(res.status).toBe(401);
+  });
+
+  async function waitForJobState(
+    cookie: string,
+    queueName: string,
+    jobId: string,
+    want: string,
+  ): Promise<Record<string, unknown>> {
+    for (let i = 0; i < 120; i++) {
+      const res = await app.request(
+        `/api/v1/jobs/${encodeURIComponent(queueName)}/${encodeURIComponent(jobId)}`,
+        { headers: { Cookie: cookie } },
+      );
+      expect(res.status).toBe(200);
+      const detail = (await res.json()) as Record<string, unknown> & { state: string };
+      if (detail.state === want) return detail;
+      if (detail.state === "failed" && want !== "failed") {
+        throw new Error(`unexpected failed: ${JSON.stringify(detail)}`);
+      }
+      await Bun.sleep(50);
+    }
+    throw new Error(`timeout waiting for state ${want}`);
+  }
+
+  it("DLQ: unrecoverable fails once, admin retries and removes", async () => {
+    await prisma.user.create({
+      data: {
+        email: "admin-dlq@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin-dlq@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const adminCookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+
+    const enq1 = await app.request("/api/v1/jobs/example.dlq/enqueue", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: adminCookie,
+        "X-Request-Id": "req_dlq_unrecoverable",
+      },
+      body: JSON.stringify({ unrecoverable: true }),
+    });
+    expect(enq1.status).toBe(200);
+    const acc1 = (await enq1.json()) as { jobId: string; queueName: string };
+    expect(acc1.queueName).toBe(exampleDlqJob.queue);
+    let d1 = (await waitForJobState(
+      adminCookie,
+      acc1.queueName,
+      acc1.jobId,
+      "failed",
+    )) as {
+      failedReason?: string;
+      metadata: { attemptsMade: number; maxAttempts?: number };
+      resolvedRetry?: { maxAttempts: number };
+    };
+    for (let s = 0; s < 30 && d1.metadata.attemptsMade < 1; s++) {
+      await Bun.sleep(40);
+      const r = await app.request(
+        `/api/v1/jobs/${encodeURIComponent(acc1.queueName)}/${encodeURIComponent(acc1.jobId)}`,
+        { headers: { Cookie: adminCookie } },
+      );
+      expect(r.status).toBe(200);
+      d1 = (await r.json()) as typeof d1;
+    }
+    expect(d1.failedReason).toBeTruthy();
+    expect(d1.metadata.attemptsMade).toBe(1);
+    expect(d1.metadata.maxAttempts).toBe(1);
+    expect(d1.resolvedRetry?.maxAttempts).toBe(1);
+
+    const enq2 = await app.request("/api/v1/jobs/example.dlq/enqueue", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: adminCookie,
+        "X-Request-Id": "req_dlq_retryable",
+      },
+      body: JSON.stringify({ errorMessage: "first run" }),
+    });
+    expect(enq2.status).toBe(200);
+    const acc2 = (await enq2.json()) as { jobId: string; queueName: string };
+    let d2 = (await waitForJobState(
+      adminCookie,
+      acc2.queueName,
+      acc2.jobId,
+      "failed",
+    )) as { failedReason?: string; metadata: { attemptsMade: number } };
+    for (let s = 0; s < 30 && d2.metadata.attemptsMade < 1; s++) {
+      await Bun.sleep(40);
+      const r = await app.request(
+        `/api/v1/jobs/${encodeURIComponent(acc2.queueName)}/${encodeURIComponent(acc2.jobId)}`,
+        { headers: { Cookie: adminCookie } },
+      );
+      expect(r.status).toBe(200);
+      d2 = (await r.json()) as typeof d2;
+    }
+    expect(d2.metadata.attemptsMade).toBe(1);
+    expect(String(d2.failedReason ?? "")).toContain("first run");
+
+    const retry = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc2.queueName)}/${encodeURIComponent(acc2.jobId)}/retry`,
+      { method: "POST", headers: { Cookie: adminCookie } },
+    );
+    expect(retry.status).toBe(200);
+    (await waitForJobState(
+      adminCookie,
+      acc2.queueName,
+      acc2.jobId,
+      "failed",
+    )) as { metadata: { attemptsMade: number } };
+
+    const del = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc2.queueName)}/${encodeURIComponent(acc2.jobId)}`,
+      { method: "DELETE", headers: { Cookie: adminCookie } },
+    );
+    expect(del.status).toBe(204);
+    const gone = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc2.queueName)}/${encodeURIComponent(acc2.jobId)}`,
+      { headers: { Cookie: adminCookie } },
+    );
+    expect(gone.status).toBe(404);
+
+    // Unrecoverable job still in failed: remove to clean up
+    const del1 = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc1.queueName)}/${encodeURIComponent(acc1.jobId)}`,
+      { method: "DELETE", headers: { Cookie: adminCookie } },
+    );
+    expect(del1.status).toBe(204);
+  });
+
+  it("DLQ: viewer cannot retry in place (403)", async () => {
+    await prisma.user.create({
+      data: {
+        email: "viewer-dlq@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    await prisma.user.create({
+      data: {
+        email: "admin2-dlq@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+
+    const adminLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin2-dlq@example.com", password: "pw" }),
+    });
+    const adminCookie = cookiePairFromSetCookie(adminLogin.headers.get("set-cookie")!);
+
+    const enq = await app.request("/api/v1/jobs/example.dlq/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: adminCookie, "X-Request-Id": "req_viewer" },
+      body: JSON.stringify({}),
+    });
+    expect(enq.status).toBe(200);
+    const { jobId, queueName } = (await enq.json()) as { jobId: string; queueName: string };
+    await waitForJobState(adminCookie, queueName, jobId, "failed");
+
+    const vLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "viewer-dlq@example.com", password: "pw" }),
+    });
+    const vCookie = cookiePairFromSetCookie(vLogin.headers.get("set-cookie")!);
+
+    const ret = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(queueName)}/${encodeURIComponent(jobId)}/retry`,
+      { method: "POST", headers: { Cookie: vCookie } },
+    );
+    expect(ret.status).toBe(403);
+
+    const del = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(queueName)}/${encodeURIComponent(jobId)}`,
+      { method: "DELETE", headers: { Cookie: vCookie } },
+    );
+    expect(del.status).toBe(403);
+
+    // Admin cleanup
+    const delAd = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(queueName)}/${encodeURIComponent(jobId)}`,
+      { method: "DELETE", headers: { Cookie: adminCookie } },
+    );
+    expect(delAd.status).toBe(204);
   });
 });

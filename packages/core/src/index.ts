@@ -12,14 +12,18 @@ export {
 
 export {
   JOB_CAPABILITY,
+  JobUnrecoverableError,
   bullmqPrefix,
   clearJobRegistryForTests,
   defineJob,
   exampleDeprecatedJob,
+  exampleDlqJob,
   exampleFailJob,
   exampleProgressJob,
   exampleSuccessJob,
+  getEffectiveRetryOptions,
   getRegisteredJob,
+  isJobUnrecoverableError,
   listRegisteredJobs,
   queueJobDataSchema,
   registerExampleJobs,

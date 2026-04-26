@@ -100,6 +100,9 @@ export function App() {
             <Link to="/jobs" style={navStyle}>
               Jobs
             </Link>
+            <Link to="/jobs?state=failed" style={navStyle}>
+              DLQ
+            </Link>
           </nav>
         ) : null}
       </header>

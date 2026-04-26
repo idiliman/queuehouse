@@ -12,6 +12,7 @@ describe("OpenAPI from job registry (contract)", () => {
     const paths = Object.keys(doc.paths ?? {});
     expect(paths).toContain("/jobs/example.success/enqueue");
     expect(paths).toContain("/jobs/example.deprecated/enqueue");
+    expect(paths).toContain("/jobs/example.dlq/enqueue");
     expect(paths).not.toContain("/jobs/example.progress/enqueue");
     expect(paths).not.toContain("/jobs/example.fail/enqueue");
   });

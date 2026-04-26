@@ -1,5 +1,6 @@
 import {
   exampleDeprecatedJob,
+  exampleDlqJob,
   exampleFailJob,
   exampleProgressJob,
   exampleSuccessJob,
@@ -12,4 +13,5 @@ export function registerExampleJobs(): void {
   registerJob(exampleProgressJob);
   registerJob(exampleDeprecatedJob);
   registerJob(exampleFailJob);
+  registerJob(exampleDlqJob);
 }

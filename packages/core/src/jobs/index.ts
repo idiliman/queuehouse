@@ -1,11 +1,14 @@
 export { defineJob, type DefineJobOptions } from "./defineJob";
 export {
   exampleDeprecatedJob,
+  exampleDlqJob,
   exampleFailJob,
   exampleProgressJob,
   exampleSuccessJob,
 } from "./examples";
 export { runExampleJobSync } from "./example-runtime";
+export { JobUnrecoverableError, isJobUnrecoverableError } from "./job-errors";
+export { getEffectiveRetryOptions } from "./retry-options";
 export {
   bullmqPrefix,
   queueJobDataSchema,

@@ -10,7 +10,12 @@ import {
   resolveSessionUser,
 } from "../auth/session";
 import type { ApiVariables } from "../api-types";
-import { getJobDetail, listJobs } from "../bullmq/queuehouse-queue";
+import {
+  getJobDetail,
+  listJobs,
+  removeFailedJob,
+  retryFailedJobInPlace,
+} from "../bullmq/queuehouse-queue";
 import { getQueuehouseRedis } from "../bullmq/redis";
 import { createApiDocsApp } from "../openapi/api-docs";
 
@@ -25,7 +30,7 @@ if (allowedOrigins.length > 0) {
     "/*",
     cors({
       origin: allowedOrigins,
-      allowMethods: ["GET", "POST", "OPTIONS"],
+      allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "X-Request-Id"],
       credentials: true,
     }),
@@ -162,6 +167,54 @@ v1.get("/jobs/:queueName/:jobId", async (c) => {
     return c.json({ error: "job_not_found" }, 404);
   }
   return c.json(detail);
+});
+
+v1.post("/jobs/:queueName/:jobId/retry", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const queueName = c.req.param("queueName");
+  const jobId = c.req.param("jobId");
+  const redis = getQueuehouseRedis(config);
+  const result = await retryFailedJobInPlace(redis, config, queueName, jobId);
+  if ("error" in result) {
+    if (result.error === "job_not_found") {
+      return c.json({ error: "job_not_found" }, 404);
+    }
+    if (result.error === "forbidden_queue") {
+      return c.json({ error: "forbidden_queue" }, 400);
+    }
+    return c.json({ error: "invalid_state" }, 400);
+  }
+  return c.json({ ok: true as const });
+});
+
+v1.delete("/jobs/:queueName/:jobId", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const queueName = c.req.param("queueName");
+  const jobId = c.req.param("jobId");
+  const redis = getQueuehouseRedis(config);
+  const result = await removeFailedJob(redis, config, queueName, jobId);
+  if ("error" in result) {
+    if (result.error === "job_not_found") {
+      return c.json({ error: "job_not_found" }, 404);
+    }
+    if (result.error === "forbidden_queue") {
+      return c.json({ error: "forbidden_queue" }, 400);
+    }
+    return c.json({ error: "invalid_state" }, 400);
+  }
+  return c.body(null, 204);
 });
 
 v1.route("/", createApiDocsApp(config));

@@ -35,6 +35,7 @@ describe("job registry", () => {
     expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b)));
     expect(names).toEqual([
       "example.deprecated",
+      "example.dlq",
       "example.fail",
       "example.progress",
       "example.success",

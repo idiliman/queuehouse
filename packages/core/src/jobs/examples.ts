@@ -85,3 +85,27 @@ export const exampleFailJob = defineJob({
   },
   description: "Throws after validating input; used to exercise failure and DLQ paths.",
 });
+
+/** Fails in one attempt and lands in failed state quickly — integration tests and operator DLQ. */
+export const exampleDlqJob = defineJob({
+  name: "example.dlq",
+  schemaVersion: 1,
+  queue: exampleQueue,
+  capabilities: [
+    JOB_CAPABILITY.ENQUEUE_API,
+    JOB_CAPABILITY.ENQUEUE_INTERNAL,
+    JOB_CAPABILITY.MANUAL_UI,
+  ],
+  input: z.object({
+    errorMessage: z.string().max(512).optional(),
+    unrecoverable: z.boolean().optional(),
+  }),
+  output: z.never(),
+  retry: { maxAttempts: 1, backoffMs: 10 },
+  timeoutMs: 10_000,
+  redaction: {
+    payloadPaths: ["errorMessage"],
+  },
+  description:
+    "Fails once (or unrecoverable immediately) for DLQ, retry, and remove paths.",
+});
