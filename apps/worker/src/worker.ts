@@ -1,7 +1,9 @@
-import { QUEUEHOUSE_VERSION } from "@queuehouse/core";
+import { loadConfig, QUEUEHOUSE_VERSION } from "@queuehouse/core";
+
+const _config = loadConfig(process.env, { requireSessionSecret: false });
 
 console.log(
-  `[queuehouse-worker] skeleton ready (core ${QUEUEHOUSE_VERSION}). BullMQ wiring comes in later slices.`,
+  `[queuehouse-worker] [${_config.namespace}] skeleton ready (core ${QUEUEHOUSE_VERSION}). BullMQ wiring comes in later slices.`,
 );
 
 if (import.meta.main) {
