@@ -14,6 +14,7 @@ import {
 } from "@queuehouse/core";
 import { UnrecoverableError, Worker } from "bullmq";
 import IORedis from "ioredis";
+import { bullmqWorkerGracefulShutdown } from "./bullmq-graceful-shutdown";
 
 const WORKER_CONCURRENCY = 5;
 
@@ -76,16 +77,51 @@ if (import.meta.main) {
     });
   }, WORKER_HEARTBEAT_REFRESH_MS);
 
+  let isShuttingDown = false;
+  const graceMs = config.workerShutdownGraceMs;
+
   async function shutdown(signal: string): Promise<void> {
+    if (isShuttingDown) {
+      return;
+    }
+    isShuttingDown = true;
     clearInterval(hbInterval);
-    console.log(`[queuehouse-worker] ${signal} received, closing workers…`);
+    console.log(
+      `[queuehouse-worker] ${signal} received, pausing and closing workers (grace ${graceMs}ms)…`,
+    );
     try {
       await connection.del(heartbeatKey);
     } catch {
       /* ignore */
     }
-    await Promise.all(workers.map((w) => w.close()));
-    await connection.quit();
+    try {
+      await bullmqWorkerGracefulShutdown(workers, {
+        graceMs,
+        onLog: (line) => {
+          console.log(line);
+        },
+        cancelReason: `signal:${signal}`,
+      });
+    } catch (err) {
+      console.error(
+        "[queuehouse-worker] error during worker shutdown",
+        err instanceof Error ? err.message : err,
+      );
+      try {
+        await connection.quit();
+      } catch {
+        /* ignore */
+      }
+      process.exit(1);
+    }
+    try {
+      await connection.quit();
+    } catch (err) {
+      console.error(
+        "[queuehouse-worker] error closing Redis",
+        err instanceof Error ? err.message : err,
+      );
+    }
     process.exit(0);
   }
 

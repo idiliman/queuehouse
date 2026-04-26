@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { EXAMPLE_DATABASE_URL, loadConfig } from "../src/config";
+import { DEFAULT_WORKER_SHUTDOWN_GRACE_MS, EXAMPLE_DATABASE_URL, loadConfig } from "../src/config";
 
 const baseEnv = {
   DATABASE_URL: EXAMPLE_DATABASE_URL,
@@ -14,6 +14,18 @@ describe("loadConfig", () => {
     expect(c.redisUrl).toBe("redis://localhost:6379");
     expect(c.namespace).toBe("queuehouse");
     expect(c.port).toBe(3000);
+    expect(c.workerShutdownGraceMs).toBe(DEFAULT_WORKER_SHUTDOWN_GRACE_MS);
+  });
+
+  it("parses WORKER_SHUTDOWN_GRACE_MS", () => {
+    const c = loadConfig({ ...baseEnv, NODE_ENV: "development", WORKER_SHUTDOWN_GRACE_MS: "5000" });
+    expect(c.workerShutdownGraceMs).toBe(5000);
+  });
+
+  it("rejects invalid WORKER_SHUTDOWN_GRACE_MS", () => {
+    expect(() => loadConfig({ ...baseEnv, WORKER_SHUTDOWN_GRACE_MS: "-1" })).toThrow(
+      /WORKER_SHUTDOWN_GRACE_MS/,
+    );
   });
 
   it("uses APP_NAMESPACE when set", () => {

@@ -3,6 +3,7 @@ import "./load-builtins";
 export const QUEUEHOUSE_VERSION = "0.0.0-skeleton";
 
 export {
+  DEFAULT_WORKER_SHUTDOWN_GRACE_MS,
   EXAMPLE_DATABASE_URL,
   loadConfig,
   type LoadConfigOptions,

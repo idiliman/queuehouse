@@ -13,6 +13,9 @@ export type LoadConfigOptions = {
   requireSessionSecret?: boolean;
 };
 
+/** Default for worker `WORKER_SHUTDOWN_GRACE_MS` when unset (SIGTERM / SIGINT). */
+export const DEFAULT_WORKER_SHUTDOWN_GRACE_MS = 30_000;
+
 export type QueuehouseConfig = {
   nodeEnv: NodeEnv;
   /** Logical deployment / tenant namespace for logs and health payloads. */
@@ -22,6 +25,11 @@ export type QueuehouseConfig = {
   redisUrl?: string;
   /** Present when set; required in production for API processes when `requireSessionSecret` is true. */
   sessionSecret?: string;
+  /**
+   * Max time the worker process waits for in-flight jobs after pause before forcing close.
+   * Zero means do not wait beyond pause/cancel. Parsed from `WORKER_SHUTDOWN_GRACE_MS`.
+   */
+  workerShutdownGraceMs: number;
 };
 
 const WEAK_SESSION_SECRETS = new Set(
@@ -83,6 +91,23 @@ export function loadConfig(
   const redisUrl = requireRedisUrl ? required(env, "REDIS_URL") : optional(env, "REDIS_URL");
   const sessionSecret = optional(env, "SESSION_SECRET");
 
+  const graceRaw = optional(env, "WORKER_SHUTDOWN_GRACE_MS");
+  let workerShutdownGraceMs = DEFAULT_WORKER_SHUTDOWN_GRACE_MS;
+  if (graceRaw !== undefined) {
+    const n = Number(graceRaw);
+    if (!Number.isInteger(n) || n < 0) {
+      throw new Error(
+        `Invalid WORKER_SHUTDOWN_GRACE_MS: ${graceRaw} — expected non-negative integer milliseconds`,
+      );
+    }
+    if (n > 3_600_000) {
+      throw new Error(
+        "Invalid WORKER_SHUTDOWN_GRACE_MS — must be at most 3600000 (1 hour).",
+      );
+    }
+    workerShutdownGraceMs = n;
+  }
+
   if (nodeEnv === "production") {
     if (databaseUrl !== undefined && databaseUrl === EXAMPLE_DATABASE_URL) {
       throw new Error(
@@ -113,5 +138,6 @@ export function loadConfig(
     databaseUrl,
     redisUrl,
     sessionSecret,
+    workerShutdownGraceMs,
   };
 }
