@@ -5,6 +5,8 @@ import { randomBytes } from "node:crypto";
 import { QUEUEHOUSE_VERSION } from "@queuehouse/core";
 import { runReadinessFromEnv } from "./readyz";
 import type { ApiVariables } from "./api-types";
+import { getQueuehouseRedis } from "./bullmq/redis";
+import { prometheusContentType, renderPrometheusText } from "./metrics/prometheus";
 import { v1 } from "./routes/v1";
 
 const app = new Hono<{ Variables: ApiVariables }>();
@@ -39,6 +41,12 @@ app.get("/readyz", async (c) => {
       503,
     );
   }
+});
+
+app.get("/metrics", async (c) => {
+  const redis = getQueuehouseRedis(config);
+  const body = await renderPrometheusText(redis, config);
+  return c.text(body, 200, { "Content-Type": prometheusContentType() });
 });
 
 app.route("/api/v1", v1);
