@@ -16,6 +16,7 @@ import IORedis from "ioredis";
 import {
   bullmqPrefix,
   exampleDlqJob,
+  exampleFailJob,
   exampleSuccessJob,
   loadConfig,
   runJobFromQueueData,
@@ -392,5 +393,82 @@ integrationDescribe("Enqueue through worker (integration)", () => {
       { method: "DELETE", headers: { Cookie: adminCookie } },
     );
     expect(delAd.status).toBe(204);
+  });
+
+  it("DLQ: enqueue retry override exhausts configured attempts on example.fail", async () => {
+    await prisma.user.create({
+      data: {
+        email: "admin-exhaust@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin-exhaust@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+
+    const enq = await app.request("/api/v1/jobs/example.fail/enqueue", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+        "X-Request-Id": "req_exhaust",
+      },
+      body: JSON.stringify({
+        errorMessage: "exhaust test",
+        retry: { maxAttempts: 3, backoffMs: 0 },
+      }),
+    });
+    expect(enq.status).toBe(200);
+    const acc = (await enq.json()) as { jobId: string; queueName: string };
+    expect(acc.queueName).toBe(exampleFailJob.queue);
+
+    const detail = (await waitForJobState(
+      cookie,
+      acc.queueName,
+      acc.jobId,
+      "failed",
+    )) as {
+      failedReason?: string;
+      metadata: { attemptsMade: number; maxAttempts?: number };
+    };
+    expect(detail.metadata.maxAttempts).toBe(3);
+    expect(detail.metadata.attemptsMade).toBe(3);
+    expect(String(detail.failedReason ?? "")).toContain("exhaust test");
+
+    const del = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}`,
+      { method: "DELETE", headers: { Cookie: cookie } },
+    );
+    expect(del.status).toBe(204);
+  });
+
+  it("enqueue: rejects retry override when job does not allow overrides", async () => {
+    await prisma.user.create({
+      data: {
+        email: "u-dep@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "u-dep@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const res = await app.request("/api/v1/jobs/example.deprecated/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ legacy: true, retry: { maxAttempts: 1 } }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("retry_override_not_allowed");
   });
 });

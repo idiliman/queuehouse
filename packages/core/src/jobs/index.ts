@@ -8,7 +8,12 @@ export {
 } from "./examples";
 export { runExampleJobSync } from "./example-runtime";
 export { JobUnrecoverableError, isJobUnrecoverableError } from "./job-errors";
-export { getEffectiveRetryOptions } from "./retry-options";
+export {
+  getEffectiveRetryOptions,
+  resolveBullmqRetryForEnqueue,
+  splitJobEnqueueBody,
+  type EnqueueRetryOverride,
+} from "./retry-options";
 export {
   bullmqPrefix,
   queueJobDataSchema,
@@ -24,4 +29,9 @@ export {
   registerJob,
 } from "./registry";
 export { JOB_CAPABILITY, type JobCapability, type RegisteredJob } from "./types";
-export type { JobRedactionMeta, JobRetryDefaults } from "./types";
+export type {
+  JobRedactionMeta,
+  JobRetryDefaults,
+  JobRetryNumericBounds,
+  JobRetryOverrideBounds,
+} from "./types";

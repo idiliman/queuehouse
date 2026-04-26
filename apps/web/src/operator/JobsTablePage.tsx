@@ -48,8 +48,17 @@ function initialJobsPrefsFromLocation(): JobsTablePrefs {
   return base;
 }
 
-export function JobsTablePage() {
-  const [prefs, setPrefs] = useState<JobsTablePrefs>(() => initialJobsPrefsFromLocation());
+export type JobsTablePageProps = {
+  /** Seeds the state filter on first mount (e.g. dedicated `/dlq` route). */
+  initialState?: string;
+};
+
+export function JobsTablePage({ initialState }: JobsTablePageProps) {
+  const [prefs, setPrefs] = useState<JobsTablePrefs>(() => {
+    const base = loadJobsTablePrefs();
+    if (initialState) return { ...base, state: initialState };
+    return initialJobsPrefsFromLocation();
+  });
   const [rows, setRows] = useState<JobListItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);

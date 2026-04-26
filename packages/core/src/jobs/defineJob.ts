@@ -1,7 +1,8 @@
-import type { z } from "zod";
+import { z } from "zod";
 import type {
   JobRedactionMeta,
   JobRetryDefaults,
+  JobRetryOverrideBounds,
   RegisteredJob,
 } from "./types";
 
@@ -13,6 +14,7 @@ export type DefineJobOptions = {
   input: z.ZodTypeAny;
   output: z.ZodTypeAny;
   retry?: JobRetryDefaults;
+  retryOverrides?: JobRetryOverrideBounds;
   timeoutMs?: number;
   redaction?: JobRedactionMeta;
   description?: string;
@@ -20,6 +22,9 @@ export type DefineJobOptions = {
 };
 
 export function defineJob(opts: DefineJobOptions): RegisteredJob {
+  if (opts.retryOverrides && !(opts.input instanceof z.ZodObject)) {
+    throw new Error(`Job "${opts.name}": retryOverrides require a ZodObject input schema`);
+  }
   const retry: JobRetryDefaults = opts.retry ?? {};
   const redaction: JobRedactionMeta = {
     payloadPaths: opts.redaction?.payloadPaths ? [...opts.redaction.payloadPaths] : [],
@@ -34,6 +39,7 @@ export function defineJob(opts: DefineJobOptions): RegisteredJob {
     inputSchema: opts.input,
     outputSchema: opts.output,
     retry,
+    retryOverrides: opts.retryOverrides,
     timeoutMs: opts.timeoutMs,
     redaction,
     description: opts.description?.trim() || undefined,

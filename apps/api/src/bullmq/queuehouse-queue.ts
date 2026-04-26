@@ -7,6 +7,8 @@ import {
   JOB_CAPABILITY,
   listRegisteredJobs,
   redactObjectAtPaths,
+  resolveBullmqRetryForEnqueue,
+  splitJobEnqueueBody,
   type QueuehouseConfig,
 } from "@queuehouse/core";
 
@@ -41,7 +43,7 @@ export async function enqueueAuthenticatedJob(
   config: QueuehouseConfig,
   params: {
     jobName: string;
-    payload: unknown;
+    body: unknown;
     requestId: string;
     user: { id: string; role: string };
   },
@@ -57,15 +59,16 @@ export async function enqueueAuthenticatedJob(
     e.code = "enqueue_not_allowed";
     throw e;
   }
-  job.inputSchema.parse(params.payload);
+  const { payload, retryOverride } = splitJobEnqueueBody(job, params.body);
+  job.inputSchema.parse(payload);
 
-  const eff = getEffectiveRetryOptions(job);
+  const eff = resolveBullmqRetryForEnqueue(job, retryOverride);
   const queue = getOrCreateQueue(redis, config, job.queue);
   const bullJob = await queue.add(
     params.jobName,
     {
       jobName: params.jobName,
-      payload: params.payload,
+      payload,
       requestId: params.requestId,
       enqueuedBy: { userId: params.user.id, role: params.user.role },
     },

@@ -8,6 +8,7 @@ import {
   listRegisteredJobs,
   loadConfig,
   type QueuehouseConfig,
+  type RegisteredJob,
 } from "@queuehouse/core";
 import type { ApiVariables } from "../api-types";
 import { enqueueAuthenticatedJob } from "../bullmq/queuehouse-queue";
@@ -15,6 +16,33 @@ import { getQueuehouseRedis } from "../bullmq/redis";
 
 function hasEnqueueApi(job: { capabilities: readonly string[] }): boolean {
   return job.capabilities.includes(JOB_CAPABILITY.ENQUEUE_API);
+}
+
+function jobEnqueueRequestSchema(job: RegisteredJob): z.ZodTypeAny {
+  const input = job.inputSchema as unknown as z.ZodTypeAny;
+  if (job.retryOverrides && input instanceof z.ZodObject) {
+    const retryField = z
+      .object({
+        maxAttempts: z.number().int().optional(),
+        backoffMs: z.number().int().optional(),
+      })
+      .strict()
+      .optional();
+    return (input as { merge: (s: z.ZodTypeAny) => z.ZodTypeAny }).merge(
+      z.object({ retry: retryField }),
+    );
+  }
+  return input;
+}
+
+function genericBodyToJobBody(payload: unknown, retry: unknown): unknown {
+  if (retry === undefined) return payload;
+  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+    return { ...(payload as Record<string, unknown>), retry };
+  }
+  const e = new Error("retry_with_non_object_payload") as Error & { code?: string };
+  e.code = "retry_with_non_object_payload";
+  throw e;
 }
 
 const genericEnqueueBody = z.object({
@@ -25,6 +53,13 @@ const genericEnqueueBody = z.object({
   payload: z
     .unknown()
     .describe("JSON payload; must match the target job input schema."),
+  retry: z
+    .object({
+      maxAttempts: z.number().int().optional(),
+      backoffMs: z.number().int().optional(),
+    })
+    .strict()
+    .optional(),
 });
 
 const enqueueAccepted = z.object({
@@ -39,6 +74,10 @@ const enqueueClientError = z.object({
     "enqueue_not_allowed",
     "validation_failed",
     "invalid_json",
+    "retry_override_not_allowed",
+    "retry_override_invalid",
+    "retry_override_out_of_range",
+    "retry_with_non_object_payload",
   ]),
   issues: z.unknown().optional(),
 });
@@ -97,7 +136,7 @@ export function createApiDocsApp(
         body: {
           content: {
             "application/json": {
-              schema: job.inputSchema as unknown as import("zod").ZodType<
+              schema: jobEnqueueRequestSchema(job) as unknown as import("zod").ZodType<
                 unknown,
                 import("zod").ZodTypeDef,
                 unknown
@@ -144,7 +183,7 @@ export function createApiDocsApp(
       try {
         const { jobId, queueName } = await enqueueAuthenticatedJob(redis, cfg, {
           jobName: job.name,
-          payload: body,
+          body,
           requestId,
           user: { id: user.id, role: user.role },
         });
@@ -160,6 +199,18 @@ export function createApiDocsApp(
         }
         if (code === "enqueue_not_allowed") {
           return c.json({ error: "enqueue_not_allowed" as const }, 403);
+        }
+        if (code === "retry_override_not_allowed") {
+          return c.json({ error: "retry_override_not_allowed" as const }, 400);
+        }
+        if (code === "retry_override_invalid") {
+          return c.json({ error: "retry_override_invalid" as const }, 400);
+        }
+        if (code === "retry_override_out_of_range") {
+          return c.json({ error: "retry_override_out_of_range" as const }, 400);
+        }
+        if (code === "retry_with_non_object_payload") {
+          return c.json({ error: "retry_with_non_object_payload" as const }, 400);
         }
         throw err;
       }
@@ -209,7 +260,11 @@ export function createApiDocsApp(
     if ("error" in parsed) {
       return c.json({ error: "invalid_json" as const }, 400);
     }
-    const envelope = parsed.body as { jobName?: string; payload?: unknown };
+    const envelope = parsed.body as {
+      jobName?: string;
+      payload?: unknown;
+      retry?: { maxAttempts?: number; backoffMs?: number };
+    };
     const jobName = typeof envelope?.jobName === "string" ? envelope.jobName : "";
     if (!jobName) {
       return c.json({ error: "validation_failed" as const, issues: [{ message: "jobName required" }] }, 400);
@@ -217,9 +272,10 @@ export function createApiDocsApp(
     const requestId = c.get("requestId")!;
     const redis = getQueuehouseRedis(cfg);
     try {
+      const body = genericBodyToJobBody(envelope.payload, envelope.retry);
       const { jobId, queueName } = await enqueueAuthenticatedJob(redis, cfg, {
         jobName,
-        payload: envelope.payload,
+        body,
         requestId,
         user: { id: user.id, role: user.role },
       });
@@ -235,6 +291,18 @@ export function createApiDocsApp(
       }
       if (code === "enqueue_not_allowed") {
         return c.json({ error: "enqueue_not_allowed" as const }, 403);
+      }
+      if (code === "retry_override_not_allowed") {
+        return c.json({ error: "retry_override_not_allowed" as const }, 400);
+      }
+      if (code === "retry_override_invalid") {
+        return c.json({ error: "retry_override_invalid" as const }, 400);
+      }
+      if (code === "retry_override_out_of_range") {
+        return c.json({ error: "retry_override_out_of_range" as const }, 400);
+      }
+      if (code === "retry_with_non_object_payload") {
+        return c.json({ error: "retry_with_non_object_payload" as const }, 400);
       }
       throw err;
     }

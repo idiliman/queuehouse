@@ -100,7 +100,7 @@ export function App() {
             <Link to="/jobs" style={navStyle}>
               Jobs
             </Link>
-            <Link to="/jobs?state=failed" style={navStyle}>
+            <Link to="/dlq" style={navStyle}>
               DLQ
             </Link>
           </nav>
@@ -178,6 +178,18 @@ export function App() {
             user ? (
               <section style={{ marginTop: "1.5rem" }}>
                 <JobsTablePage />
+              </section>
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
+        <Route
+          path="/dlq"
+          element={
+            user ? (
+              <section style={{ marginTop: "1.5rem" }}>
+                <JobsTablePage initialState="failed" />
               </section>
             ) : (
               <Navigate to="/" replace />

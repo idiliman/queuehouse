@@ -13,8 +13,8 @@ describe("OpenAPI from job registry (contract)", () => {
     expect(paths).toContain("/jobs/example.success/enqueue");
     expect(paths).toContain("/jobs/example.deprecated/enqueue");
     expect(paths).toContain("/jobs/example.dlq/enqueue");
+    expect(paths).toContain("/jobs/example.fail/enqueue");
     expect(paths).not.toContain("/jobs/example.progress/enqueue");
-    expect(paths).not.toContain("/jobs/example.fail/enqueue");
   });
 
   it("marks deprecated public jobs in the operation", () => {

@@ -22,6 +22,10 @@ export const exampleSuccessJob = defineJob({
     echoed: z.string(),
   }),
   retry: { maxAttempts: 3, backoffMs: 500 },
+  retryOverrides: {
+    maxAttempts: { min: 1, max: 10 },
+    backoffMs: { min: 0, max: 60_000 },
+  },
   timeoutMs: 30_000,
   redaction: {
     payloadPaths: ["message"],
@@ -72,13 +76,21 @@ export const exampleFailJob = defineJob({
   name: "example.fail",
   schemaVersion: 1,
   queue: exampleQueue,
-  capabilities: [JOB_CAPABILITY.ENQUEUE_INTERNAL, JOB_CAPABILITY.MANUAL_UI],
+  capabilities: [
+    JOB_CAPABILITY.ENQUEUE_API,
+    JOB_CAPABILITY.ENQUEUE_INTERNAL,
+    JOB_CAPABILITY.MANUAL_UI,
+  ],
   input: z.object({
     errorMessage: z.string().max(512).optional(),
   }),
   /** Successful completion is invalid for this job; parsers reject any payload. */
   output: z.never(),
   retry: { maxAttempts: 5, backoffMs: 250 },
+  retryOverrides: {
+    maxAttempts: { min: 1, max: 10 },
+    backoffMs: { min: 0, max: 60_000 },
+  },
   timeoutMs: 10_000,
   redaction: {
     payloadPaths: ["errorMessage"],
@@ -102,6 +114,10 @@ export const exampleDlqJob = defineJob({
   }),
   output: z.never(),
   retry: { maxAttempts: 1, backoffMs: 10 },
+  retryOverrides: {
+    maxAttempts: { min: 1, max: 5 },
+    backoffMs: { min: 0, max: 5_000 },
+  },
   timeoutMs: 10_000,
   redaction: {
     payloadPaths: ["errorMessage"],

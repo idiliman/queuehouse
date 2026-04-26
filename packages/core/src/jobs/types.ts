@@ -21,6 +21,17 @@ export type JobRetryDefaults = {
   backoffMs?: number;
 };
 
+/** Inclusive bounds for per-request enqueue retry overrides (when `retryOverrides` is set on the job). */
+export type JobRetryNumericBounds = {
+  min: number;
+  max: number;
+};
+
+export type JobRetryOverrideBounds = {
+  maxAttempts?: JobRetryNumericBounds;
+  backoffMs?: JobRetryNumericBounds;
+};
+
 /** Declares which logical paths are treated as sensitive in operator surfaces. */
 export type JobRedactionMeta = {
   /** Dot-paths or simple keys under payload to treat as sensitive (e.g. `user.email`). */
@@ -37,6 +48,8 @@ export type RegisteredJob = {
   readonly inputSchema: z.ZodTypeAny;
   readonly outputSchema: z.ZodTypeAny;
   readonly retry: JobRetryDefaults;
+  /** When set, authenticated enqueue bodies may include a `retry` object with bounded overrides. */
+  readonly retryOverrides?: JobRetryOverrideBounds;
   readonly timeoutMs?: number;
   readonly redaction: JobRedactionMeta;
   readonly description?: string;
