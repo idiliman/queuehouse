@@ -12,6 +12,7 @@ import { SchedulesPage } from "./operator/SchedulesPage";
 import { AuditLogPage } from "./operator/AuditLogPage";
 import { JobDetailPage } from "./operator/JobDetailPage";
 import { JobsTablePage } from "./operator/JobsTablePage";
+import { WorkersPage } from "./operator/WorkersPage";
 
 type Role = "VIEWER" | "ADMIN";
 
@@ -106,6 +107,9 @@ export function App() {
             </Link>
             <Link to="/dlq" style={navStyle}>
               DLQ
+            </Link>
+            <Link to="/workers" style={navStyle}>
+              Workers
             </Link>
             {user.role === "ADMIN" ? (
               <>
@@ -210,6 +214,18 @@ export function App() {
             user ? (
               <section style={{ marginTop: "1.5rem" }}>
                 <JobsTablePage initialState="failed" />
+              </section>
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
+        <Route
+          path="/workers"
+          element={
+            user ? (
+              <section style={{ marginTop: "1.5rem" }}>
+                <WorkersPage role={user.role} />
               </section>
             ) : (
               <Navigate to="/" replace />

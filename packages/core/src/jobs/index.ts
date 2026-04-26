@@ -40,6 +40,13 @@ export {
   mergePayloadWithRetryForEnqueue,
   resolveManualEnqueueDelayMs,
 } from "./manual-enqueue";
+export {
+  WORKER_HEARTBEAT_REFRESH_MS,
+  WORKER_HEARTBEAT_TTL_SEC,
+  workerHeartbeatKeyPattern,
+  workerHeartbeatRedisKey,
+  type WorkerHeartbeatPayload,
+} from "./worker-heartbeat";
 export type {
   JobRedactionMeta,
   JobRetryDefaults,

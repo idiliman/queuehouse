@@ -13,6 +13,8 @@ export const AUDIT_ACTION = {
   SCHEDULE_CREATE: "schedule.create",
   SCHEDULE_UPDATE: "schedule.update",
   SCHEDULE_DELETE: "schedule.delete",
+  QUEUE_PAUSE: "queue.pause",
+  QUEUE_RESUME: "queue.resume",
 } as const;
 
 export const AUDIT_RESULT = {

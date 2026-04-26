@@ -29,7 +29,10 @@ import {
   getBullJobName,
   getJobDetail,
   listJobs,
+  listQueuesAndWorkers,
+  pauseRegisteredQueue,
   removeFailedJob,
+  resumeRegisteredQueue,
   retryFailedJobAsNew,
   retryFailedJobInPlace,
 } from "../bullmq/queuehouse-queue";
@@ -940,6 +943,71 @@ function adminSessionOnly(c: { get: (key: string) => unknown }): boolean {
   if (!user || c.get("apiKey")) return false;
   return (user as { role: string }).role === "ADMIN";
 }
+
+/**
+ * Operational queue stats (BullMQ counts, paused flag) and worker heartbeats from Redis TTL keys.
+ * Requires `read` scope (session or API key).
+ */
+v1.get("/queues", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (!hasApiKeyScope(c, "read")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const redis = getQueuehouseRedis(config);
+  const data = await listQueuesAndWorkers(redis, config);
+  return c.json(data);
+});
+
+v1.post("/queues/:queueName/pause", async (c) => {
+  if (!adminSessionOnly(c)) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  const queueName = c.req.param("queueName");
+  const redis = getQueuehouseRedis(config);
+  const result = await pauseRegisteredQueue(redis, config, queueName);
+  if ("error" in result) {
+    await recordAudit(c, {
+      action: AUDIT_ACTION.QUEUE_PAUSE,
+      summary: { queueName },
+      result: AUDIT_RESULT.FAILURE,
+      errorCode: result.error,
+    });
+    return c.json({ error: "unknown_queue" as const }, 400);
+  }
+  await recordAudit(c, {
+    action: AUDIT_ACTION.QUEUE_PAUSE,
+    summary: { queueName },
+    result: AUDIT_RESULT.SUCCESS,
+  });
+  return c.json({ ok: true as const });
+});
+
+v1.post("/queues/:queueName/resume", async (c) => {
+  if (!adminSessionOnly(c)) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  const queueName = c.req.param("queueName");
+  const redis = getQueuehouseRedis(config);
+  const result = await resumeRegisteredQueue(redis, config, queueName);
+  if ("error" in result) {
+    await recordAudit(c, {
+      action: AUDIT_ACTION.QUEUE_RESUME,
+      summary: { queueName },
+      result: AUDIT_RESULT.FAILURE,
+      errorCode: result.error,
+    });
+    return c.json({ error: "unknown_queue" as const }, 400);
+  }
+  await recordAudit(c, {
+    action: AUDIT_ACTION.QUEUE_RESUME,
+    summary: { queueName },
+    result: AUDIT_RESULT.SUCCESS,
+  });
+  return c.json({ ok: true as const });
+});
 
 v1.post("/schedules/preview", async (c) => {
   if (!adminSessionOnly(c)) {

@@ -49,4 +49,9 @@ export {
   type JobScheduleSyncInput,
   type QueueJobData,
   type RegisteredJob,
+  WORKER_HEARTBEAT_REFRESH_MS,
+  WORKER_HEARTBEAT_TTL_SEC,
+  workerHeartbeatKeyPattern,
+  workerHeartbeatRedisKey,
+  type WorkerHeartbeatPayload,
 } from "./jobs";

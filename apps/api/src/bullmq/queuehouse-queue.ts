@@ -10,7 +10,10 @@ import {
   redactObjectAtPaths,
   resolveBullmqRetryForEnqueue,
   splitJobEnqueueBody,
+  WORKER_HEARTBEAT_REFRESH_MS,
+  workerHeartbeatKeyPattern,
   type QueuehouseConfig,
+  type WorkerHeartbeatPayload,
 } from "@queuehouse/core";
 const queueInstances = new Map<string, Queue>();
 
@@ -593,5 +596,154 @@ export async function removeFailedJob(
     return { error: "invalid_state" };
   }
   await job.remove();
+  return { ok: true };
+}
+
+async function scanRedisKeys(redis: IORedis, pattern: string): Promise<string[]> {
+  const keys: string[] = [];
+  let cursor = "0";
+  do {
+    const [next, batch] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 128);
+    cursor = next;
+    keys.push(...batch);
+  } while (cursor !== "0");
+  return keys;
+}
+
+function parseWorkerHeartbeatPayload(raw: string): WorkerHeartbeatPayload | null {
+  try {
+    const o = JSON.parse(raw) as unknown;
+    if (typeof o !== "object" || o === null) return null;
+    const p = o as Record<string, unknown>;
+    if (typeof p.instanceId !== "string" || typeof p.coreVersion !== "string") return null;
+    if (!Array.isArray(p.queues) || !p.queues.every((q) => typeof q === "string")) return null;
+    if (typeof p.concurrency !== "number" || !Number.isFinite(p.concurrency)) return null;
+    if (typeof p.hostname !== "string" || typeof p.pid !== "number") return null;
+    if (typeof p.startedAt !== "string") return null;
+    return {
+      instanceId: p.instanceId,
+      coreVersion: p.coreVersion,
+      queues: p.queues,
+      concurrency: p.concurrency,
+      hostname: p.hostname,
+      pid: p.pid,
+      startedAt: p.startedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export type QueueOperationalStats = {
+  name: string;
+  paused: boolean;
+  counts: {
+    waiting: number;
+    active: number;
+    completed: number;
+    failed: number;
+    delayed: number;
+    paused: number;
+  };
+};
+
+export type WorkerHeartbeatRow = {
+  instanceId: string;
+  coreVersion: string;
+  queues: string[];
+  concurrency: number;
+  hostname: string;
+  pid: number;
+  startedAt: string;
+  heartbeatTtlSec: number;
+  stale: boolean;
+};
+
+export async function listQueueOperationalStats(
+  redis: IORedis,
+  config: QueuehouseConfig,
+): Promise<QueueOperationalStats[]> {
+  const names = [...new Set(listRegisteredJobs().map((j) => j.queue))].sort();
+  const out: QueueOperationalStats[] = [];
+  for (const name of names) {
+    const queue = getOrCreateQueue(redis, config, name);
+    const [counts, paused] = await Promise.all([queue.getJobCounts(), queue.isPaused()]);
+    out.push({
+      name,
+      paused,
+      counts: {
+        waiting: counts.waiting,
+        active: counts.active,
+        completed: counts.completed,
+        failed: counts.failed,
+        delayed: counts.delayed,
+        paused: counts.paused,
+      },
+    });
+  }
+  return out;
+}
+
+export async function listWorkerHeartbeats(
+  redis: IORedis,
+  config: QueuehouseConfig,
+): Promise<WorkerHeartbeatRow[]> {
+  const pattern = workerHeartbeatKeyPattern(config.namespace);
+  const keys = await scanRedisKeys(redis, pattern);
+  const staleThresholdSec = Math.max(1, Math.ceil(WORKER_HEARTBEAT_REFRESH_MS / 1000));
+  const rows: WorkerHeartbeatRow[] = [];
+  for (const key of keys) {
+    const [raw, ttl] = await Promise.all([redis.get(key), redis.ttl(key)]);
+    if (raw == null || ttl == null || ttl < 0) continue;
+    const parsed = parseWorkerHeartbeatPayload(raw);
+    if (!parsed) continue;
+    rows.push({
+      instanceId: parsed.instanceId,
+      coreVersion: parsed.coreVersion,
+      queues: parsed.queues,
+      concurrency: parsed.concurrency,
+      hostname: parsed.hostname,
+      pid: parsed.pid,
+      startedAt: parsed.startedAt,
+      heartbeatTtlSec: ttl,
+      stale: ttl <= staleThresholdSec,
+    });
+  }
+  rows.sort((a, b) => a.instanceId.localeCompare(b.instanceId));
+  return rows;
+}
+
+export async function listQueuesAndWorkers(
+  redis: IORedis,
+  config: QueuehouseConfig,
+): Promise<{ queues: QueueOperationalStats[]; workers: WorkerHeartbeatRow[] }> {
+  const [queues, workers] = await Promise.all([
+    listQueueOperationalStats(redis, config),
+    listWorkerHeartbeats(redis, config),
+  ]);
+  return { queues, workers };
+}
+
+export async function pauseRegisteredQueue(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  queueName: string,
+): Promise<{ ok: true } | { error: "unknown_queue" }> {
+  const reg = new Set(listRegisteredJobs().map((j) => j.queue));
+  if (!reg.has(queueName)) return { error: "unknown_queue" };
+  const queue = getOrCreateQueue(redis, config, queueName);
+  await queue.pause();
+  return { ok: true };
+}
+
+export async function resumeRegisteredQueue(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  queueName: string,
+): Promise<{ ok: true } | { error: "unknown_queue" }> {
+  const reg = new Set(listRegisteredJobs().map((j) => j.queue));
+  if (!reg.has(queueName)) return { error: "unknown_queue" };
+  const queue = getOrCreateQueue(redis, config, queueName);
+  await queue.resume();
   return { ok: true };
 }
