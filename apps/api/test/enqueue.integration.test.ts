@@ -805,4 +805,137 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     const b = (await res.json()) as { result?: { echoed: string } };
     expect(b.result).toEqual({ echoed: "waited" });
   });
+
+  it("raw reveal: GET stays redacted; admin POST returns raw and audits; viewer and API key forbidden", async () => {
+    await prisma.user.create({
+      data: {
+        email: "raw-admin@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    await prisma.user.create({
+      data: {
+        email: "raw-viewer@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    const adminLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "raw-admin@example.com", password: "pw" }),
+    });
+    const adminCookie = cookiePairFromSetCookie(adminLogin.headers.get("set-cookie")!);
+    const vLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "raw-viewer@example.com", password: "pw" }),
+    });
+    const viewerCookie = cookiePairFromSetCookie(vLogin.headers.get("set-cookie")!);
+
+    const reqId = "req_raw_reveal_1";
+    const enq = await app.request("/api/v1/jobs/example.success/enqueue", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: adminCookie,
+        "X-Request-Id": reqId,
+      },
+      body: JSON.stringify({ message: "raw-secret-abc" }),
+    });
+    expect(enq.status).toBe(200);
+    const acc = (await enq.json()) as { jobId: string; queueName: string };
+    for (let i = 0; i < 80; i++) {
+      const r = await app.request(
+        `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}`,
+        { headers: { Cookie: adminCookie } },
+      );
+      expect(r.status).toBe(200);
+      const d = (await r.json()) as { state: string; payload: { message?: string } };
+      if (d.state === "completed") {
+        break;
+      }
+      await Bun.sleep(50);
+    }
+
+    const viewerGet = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}`,
+      { headers: { Cookie: viewerCookie } },
+    );
+    expect(viewerGet.status).toBe(200);
+    const vDetail = (await viewerGet.json()) as { payload: { message?: string } };
+    expect(vDetail.payload.message).toBe("[REDACTED]");
+
+    const vReveal = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}/raw-reveal`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: viewerCookie },
+        body: JSON.stringify({ reason: "should fail" }),
+      },
+    );
+    expect(vReveal.status).toBe(403);
+
+    const keyCreate = await app.request("/api/v1/api-keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: adminCookie },
+      body: JSON.stringify({
+        name: "raw-test",
+        scopes: ["read", "admin"],
+        allowedJobTypes: ["example.success"],
+      }),
+    });
+    expect(keyCreate.status).toBe(201);
+    const { token: apiToken } = (await keyCreate.json()) as { token: string };
+    const keyReveal = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}/raw-reveal`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body: JSON.stringify({ reason: "api key" }),
+      },
+    );
+    expect(keyReveal.status).toBe(403);
+
+    const badBody = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}/raw-reveal`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ reason: "" }),
+      },
+    );
+    expect(badBody.status).toBe(400);
+
+    const revealReq = "req_raw_reveal_audit";
+    const ok = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}/raw-reveal`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: adminCookie,
+          "X-Request-Id": revealReq,
+        },
+        body: JSON.stringify({ reason: "incident-42 investigation" }),
+      },
+    );
+    expect(ok.status).toBe(200);
+    const raw = (await ok.json()) as { payload: { message?: string }; result: { echoed?: string } };
+    expect(raw.payload.message).toBe("raw-secret-abc");
+    expect(raw.result).toEqual({ echoed: "raw-secret-abc" });
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { requestId: revealReq, action: "job.raw_reveal" },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit?.result).toBe("SUCCESS");
+    const asum = audit?.summary as Record<string, unknown>;
+    expect(asum.reason).toBe("incident-42 investigation");
+    expect(asum.jobName).toBe("example.success");
+  });
 });

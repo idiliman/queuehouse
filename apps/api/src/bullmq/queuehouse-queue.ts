@@ -342,6 +342,26 @@ function redactForRegisteredJob(
   };
 }
 
+/**
+ * Unredacted job payload and return value. Used only for audited admin raw-reveal; list/detail use redaction.
+ */
+export async function getUnredactedPayloadResult(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  queueName: string,
+  jobId: string,
+): Promise<{ jobName?: string; payload: unknown; result: unknown } | null> {
+  const queue = getOrCreateQueue(redis, config, queueName);
+  const job: Job | undefined = await queue.getJob(jobId);
+  if (!job) return null;
+  const data = job.data as { jobName?: string; payload?: unknown };
+  return {
+    jobName: data.jobName,
+    payload: data.payload,
+    result: job.returnvalue,
+  };
+}
+
 export type ListJobsQuery = {
   /** Limit one queue; when omitted, all registered queues are scanned. */
   queue?: string;

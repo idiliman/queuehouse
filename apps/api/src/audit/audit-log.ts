@@ -15,6 +15,7 @@ export const AUDIT_ACTION = {
   SCHEDULE_DELETE: "schedule.delete",
   QUEUE_PAUSE: "queue.pause",
   QUEUE_RESUME: "queue.resume",
+  JOB_RAW_REVEAL: "job.raw_reveal",
 } as const;
 
 export const AUDIT_RESULT = {

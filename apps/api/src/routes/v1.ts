@@ -28,6 +28,7 @@ import {
   enqueueManualUiJob,
   getBullJobName,
   getJobDetail,
+  getUnredactedPayloadResult,
   listJobs,
   listQueuesAndWorkers,
   pauseRegisteredQueue,
@@ -671,6 +672,65 @@ v1.get("/jobs/:queueName/:jobId", async (c) => {
     return c.json({ error: "job_not_found" }, 404);
   }
   return c.json(detail);
+});
+
+const rawRevealBody = z
+  .object({
+    reason: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+
+/**
+ * Admin session only: return unredacted payload/result after an explicit audited reason. API keys cannot call.
+ */
+v1.post("/jobs/:queueName/:jobId/raw-reveal", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" as const }, 401);
+  }
+  if (c.get("apiKey")) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  let body: z.infer<typeof rawRevealBody>;
+  try {
+    body = rawRevealBody.parse(await c.req.json());
+  } catch (err) {
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    return c.json({ error: "invalid_json" as const }, 400);
+  }
+  const queueName = c.req.param("queueName");
+  const jobId = c.req.param("jobId");
+  const redis = getQueuehouseRedis(config);
+  const raw = await getUnredactedPayloadResult(redis, config, queueName, jobId);
+  if (!raw) {
+    await recordAudit(c, {
+      action: AUDIT_ACTION.JOB_RAW_REVEAL,
+      summary: {
+        queueName,
+        jobId,
+        reason: body.reason,
+      },
+      result: AUDIT_RESULT.FAILURE,
+      errorCode: "job_not_found",
+    });
+    return c.json({ error: "job_not_found" as const }, 404);
+  }
+  await recordAudit(c, {
+    action: AUDIT_ACTION.JOB_RAW_REVEAL,
+    summary: {
+      queueName,
+      jobId,
+      jobName: raw.jobName ?? null,
+      reason: body.reason,
+    },
+    result: AUDIT_RESULT.SUCCESS,
+  });
+  return c.json({ payload: raw.payload, result: raw.result });
 });
 
 v1.post("/jobs/:queueName/:jobId/retry", async (c) => {

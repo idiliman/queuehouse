@@ -50,6 +50,11 @@ export function JobDetailPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [retryAsNewText, setRetryAsNewText] = useState("");
+  const [rawRevealed, setRawRevealed] = useState<{ payload: unknown; result: unknown } | null>(null);
+  const [revealOpen, setRevealOpen] = useState(false);
+  const [revealReason, setRevealReason] = useState("");
+  const [revealBusy, setRevealBusy] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
 
   const refetch = useCallback(async () => {
     if (!queueName || !jobId) return;
@@ -58,6 +63,7 @@ export function JobDetailPage() {
       { credentials: "include" },
     );
     if (res.status === 200) {
+      setRawRevealed(null);
       setDetail((await res.json()) as JobDetail);
     }
   }, [queueName, jobId]);
@@ -116,6 +122,13 @@ export function JobDetailPage() {
     };
   }, [queueName, jobId]);
 
+  useEffect(() => {
+    setRawRevealed(null);
+    setRevealOpen(false);
+    setRevealReason("");
+    setRevealError(null);
+  }, [queueName, jobId]);
+
   if (detail === undefined && !error) {
     return <p style={{ color: "#444" }}>Loading job…</p>;
   }
@@ -160,6 +173,47 @@ export function JobDetailPage() {
   const retriedFrom = detail.metadata.retriedAsNewFrom;
   const isAdmin = user?.role === "ADMIN";
   const canDlq = isAdmin && detail.state === "failed";
+  const displayPayload = rawRevealed ? rawRevealed.payload : detail.payload;
+  const displayResult = rawRevealed ? rawRevealed.result : detail.result;
+
+  const runRevealRaw = async () => {
+    if (!queueName || !jobId) return;
+    const reason = revealReason.trim();
+    if (reason.length === 0) {
+      setRevealError("A reason is required (audit log).");
+      return;
+    }
+    setRevealError(null);
+    setRevealBusy(true);
+    try {
+      const res = await fetch(
+        `/api/v1/jobs/${encodeURIComponent(queueName)}/${encodeURIComponent(jobId)}/raw-reveal`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        },
+      );
+      if (res.status === 403) {
+        setRevealError("Only admins can load raw data (not available with API keys).");
+        return;
+      }
+      if (!res.ok) {
+        const b = (await res.json().catch(() => ({}))) as { error?: string };
+        setRevealError(b.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      const b = (await res.json()) as { payload: unknown; result: unknown };
+      setRawRevealed({ payload: b.payload, result: b.result });
+      setRevealOpen(false);
+      setRevealReason("");
+    } catch {
+      setRevealError("Network error.");
+    } finally {
+      setRevealBusy(false);
+    }
+  };
 
   const runRetry = async () => {
     if (!queueName || !jobId) return;
@@ -379,6 +433,90 @@ export function JobDetailPage() {
           {actionError}
         </p>
       ) : null}
+      {isAdmin ? (
+        <div style={{ marginTop: "1rem", maxWidth: "40rem" }}>
+          {rawRevealed ? (
+            <p style={{ fontSize: "0.86rem", color: "#4a2c0a", lineHeight: 1.5, marginBottom: "0.5rem" }}>
+              Showing <strong>raw</strong> payload/result (request audited).{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setRawRevealed(null);
+                }}
+                style={{ ...buttonSm, marginLeft: "0.35rem" }}
+              >
+                Back to redacted
+              </button>
+            </p>
+          ) : (
+            <>
+              <p style={{ fontSize: "0.86rem", color: "#333", lineHeight: 1.5 }}>
+                Raw job data is redacted. To load unredacted JSON for this job, provide a reason (stored in
+                the audit log).
+              </p>
+              {!revealOpen ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRevealOpen(true);
+                    setRevealError(null);
+                  }}
+                  style={{ ...buttonSm, marginTop: "0.35rem" }}
+                >
+                  Load raw payload &amp; result…
+                </button>
+              ) : (
+                <div style={{ marginTop: "0.5rem" }}>
+                  <label htmlFor="raw-reveal-reason" style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                    Reason
+                  </label>
+                  <textarea
+                    id="raw-reveal-reason"
+                    value={revealReason}
+                    onChange={(e) => setRevealReason(e.target.value)}
+                    rows={2}
+                    disabled={revealBusy}
+                    style={{
+                      ...preStyle,
+                      width: "100%",
+                      maxWidth: "36rem",
+                      display: "block",
+                      marginTop: "0.3rem",
+                    }}
+                    placeholder="e.g. ticket / incident id"
+                  />
+                  <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.4rem" }}>
+                    <button
+                      type="button"
+                      onClick={() => void runRevealRaw()}
+                      disabled={revealBusy}
+                      style={buttonSm}
+                    >
+                      Confirm and load
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRevealOpen(false);
+                        setRevealError(null);
+                      }}
+                      disabled={revealBusy}
+                      style={buttonSm}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+              {revealError ? (
+                <p role="alert" style={{ color: "#b42318", fontSize: "0.88rem", marginTop: "0.4rem" }}>
+                  {revealError}
+                </p>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : null}
       <h3 style={{ fontSize: "0.95rem" }}>Metadata</h3>
       <pre style={preStyle}>{JSON.stringify(detail.metadata, null, 2)}</pre>
       {detail.requestId || detail.metadata.requestId ? (
@@ -386,10 +524,16 @@ export function JobDetailPage() {
           Request: {detail.requestId ?? detail.metadata.requestId}
         </p>
       ) : null}
-      <h3 style={{ fontSize: "0.95rem" }}>Payload (redacted)</h3>
-      <pre style={preStyle}>{JSON.stringify(detail.payload, null, 2)}</pre>
-      <h3 style={{ fontSize: "0.95rem" }}>Result (redacted)</h3>
-      <pre style={preStyle}>{JSON.stringify(detail.result, null, 2)}</pre>
+      <h3 style={{ fontSize: "0.95rem" }}>
+        Payload ({rawRevealed ? "raw" : "redacted"}
+        {rawRevealed ? ", audited" : ""})
+      </h3>
+      <pre style={preStyle}>{JSON.stringify(displayPayload, null, 2)}</pre>
+      <h3 style={{ fontSize: "0.95rem" }}>
+        Result ({rawRevealed ? "raw" : "redacted"}
+        {rawRevealed ? ", audited" : ""})
+      </h3>
+      <pre style={preStyle}>{JSON.stringify(displayResult, null, 2)}</pre>
       <h3 style={{ fontSize: "0.95rem" }}>Progress</h3>
       <pre style={preStyle}>{JSON.stringify(detail.progress, null, 2)}</pre>
       {detail.failedReason ? (
