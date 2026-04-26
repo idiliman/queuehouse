@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { AdminOpsPage } from "./operator/AdminOpsPage";
 import { ApiKeysPage } from "./operator/ApiKeysPage";
 import { ManualEnqueuePage } from "./operator/ManualEnqueuePage";
 import { SchedulesPage } from "./operator/SchedulesPage";
@@ -124,6 +125,9 @@ export function App() {
                 </Link>
                 <Link to="/audit" style={navStyle}>
                   Audit
+                </Link>
+                <Link to="/admin-ops" style={navStyle}>
+                  Admin ops
                 </Link>
               </>
             ) : null}
@@ -274,6 +278,18 @@ export function App() {
             user?.role === "ADMIN" ? (
               <section style={{ marginTop: "1.5rem" }}>
                 <AuditLogPage />
+              </section>
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
+        <Route
+          path="/admin-ops"
+          element={
+            user?.role === "ADMIN" ? (
+              <section style={{ marginTop: "1.5rem" }}>
+                <AdminOpsPage />
               </section>
             ) : (
               <Navigate to="/" replace />

@@ -862,6 +862,56 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     expect(denied.status).toBe(403);
   });
 
+  it("audit: actions= query filters to multiple action values", async () => {
+    const admin = await prisma.user.create({
+      data: {
+        email: "audit-multi@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    await prisma.auditLog.createMany({
+      data: [
+        {
+          requestId: "req_audit_filter_1",
+          userId: admin.id,
+          action: "job.enqueue",
+          summary: {},
+          result: "SUCCESS",
+        },
+        {
+          requestId: "req_audit_filter_2",
+          userId: admin.id,
+          action: "job.bulk_dlq",
+          summary: { action: "retry", requested: 2 },
+          result: "SUCCESS",
+        },
+        {
+          requestId: "req_audit_filter_3",
+          userId: admin.id,
+          action: AUDIT_ACTION.BULK_DLQ_COMPLETE,
+          summary: { requested: 2, executed: 2, skipped: 0, failed: 0 },
+          result: "SUCCESS",
+        },
+      ],
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "audit-multi@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const list = await app.request(
+      "/api/v1/audit-logs?limit=20&actions=job.bulk_dlq,job.bulk_dlq_complete",
+      { headers: { Cookie: cookie } },
+    );
+    expect(list.status).toBe(200);
+    const body = (await list.json()) as { items: { action: string; requestId: string }[]; total: number };
+    expect(body.total).toBe(2);
+    expect(body.items.map((i) => i.requestId).sort()).toEqual(["req_audit_filter_2", "req_audit_filter_3"]);
+  });
+
   it("manual enqueue: admin enqueues example.progress (manual.ui only) and it completes", async () => {
     await prisma.user.create({
       data: {

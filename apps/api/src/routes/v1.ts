@@ -423,9 +423,11 @@ function isZodIssuesError(err: unknown): err is { issues: unknown } {
   );
 }
 
+const AUDIT_LOG_ACTION_FILTER_MAX = 20;
+
 /**
  * Admin-only, browser session only: paginated audit log (mutations with redacted summaries).
- * Query: `limit` (1–100), `offset`, `action` (optional exact match)
+ * Query: `limit` (1–100), `offset`, `action` (optional exact match), `actions` (optional comma-separated; if set, restricts to `action in (...)` and takes precedence over `action`)
  */
 v1.get("/audit-logs", async (c) => {
   const user = c.get("user");
@@ -443,8 +445,24 @@ v1.get("/audit-logs", async (c) => {
   const limit = Math.min(100, Math.max(1, Number.isNaN(limitRaw) ? 50 : limitRaw));
   const offsetRaw = sp.offset != null && sp.offset !== "" ? parseInt(sp.offset, 10) : 0;
   const offset = Math.min(10_000, Math.max(0, Number.isNaN(offsetRaw) ? 0 : offsetRaw));
-  const action = sp.action?.trim() || undefined;
-  const where = action ? { action } : undefined;
+  const actionsParam = sp.actions?.trim();
+  const actionSingle = sp.action?.trim() || undefined;
+  const actionInList = actionsParam
+    ? [
+        ...new Set(
+          actionsParam
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0),
+        ),
+      ].slice(0, AUDIT_LOG_ACTION_FILTER_MAX)
+    : [];
+  const where =
+    actionInList.length > 0
+      ? { action: { in: actionInList } as const }
+      : actionSingle
+        ? { action: actionSingle }
+        : undefined;
   const [rows, total] = await Promise.all([
     prisma.auditLog.findMany({
       where,
