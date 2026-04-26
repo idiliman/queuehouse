@@ -1,5 +1,10 @@
 import type { RegisteredJob } from "./types";
-import { exampleFailJob, exampleProgressJob, exampleSuccessJob } from "./examples";
+import {
+  exampleDeprecatedJob,
+  exampleFailJob,
+  exampleProgressJob,
+  exampleSuccessJob,
+} from "./examples";
 
 /**
  * Minimal synchronous handlers so tests (and future worker stubs) can exercise
@@ -20,6 +25,10 @@ export function runExampleJobSync(job: RegisteredJob, rawInput: unknown): unknow
       log.push(`step ${i}/${steps}`);
     }
     return job.outputSchema.parse({ completed: steps, log });
+  }
+
+  if (job.name === exampleDeprecatedJob.name) {
+    return job.outputSchema.parse({ done: true });
   }
 
   if (job.name === exampleFailJob.name) {

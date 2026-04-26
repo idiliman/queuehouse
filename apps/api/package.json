@@ -10,11 +10,14 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@hono/zod-openapi": "0.18.0",
     "@prisma/client": "^6.3.1",
     "@queuehouse/core": "workspace:*",
     "@queuehouse/db": "workspace:*",
+    "@scalar/hono-api-reference": "^0.10.10",
     "hono": "^4.7.4",
-    "ioredis": "^5.6.0"
+    "ioredis": "^5.6.0",
+    "zod": "3.24.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

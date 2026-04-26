@@ -1,10 +1,11 @@
+import "./openapi/zod-patch";
 import { config } from "./config";
 import { Hono } from "hono";
 import { randomBytes } from "node:crypto";
 import { QUEUEHOUSE_VERSION } from "@queuehouse/core";
 import { runReadinessFromEnv } from "./readyz";
+import type { ApiVariables } from "./api-types";
 import { v1 } from "./routes/v1";
-import type { ApiVariables } from "./routes/v1";
 
 const app = new Hono<{ Variables: ApiVariables }>();
 

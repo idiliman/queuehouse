@@ -40,4 +40,6 @@ export type RegisteredJob = {
   readonly timeoutMs?: number;
   readonly redaction: JobRedactionMeta;
   readonly description?: string;
+  /** When set, the job's public HTTP operations are marked `deprecated` in OpenAPI. */
+  readonly deprecated?: boolean;
 };

@@ -47,6 +47,25 @@ export const exampleProgressJob = defineJob({
   description: "Reference job for progress and structured logs once BullMQ progress lands.",
 });
 
+/** Marked deprecated in OpenAPI; kept for contract tests and migration demos. */
+export const exampleDeprecatedJob = defineJob({
+  name: "example.deprecated",
+  schemaVersion: 1,
+  queue: exampleQueue,
+  capabilities: [JOB_CAPABILITY.ENQUEUE_API, JOB_CAPABILITY.ENQUEUE_INTERNAL],
+  input: z.object({
+    legacy: z.boolean().optional(),
+  }),
+  output: z.object({
+    done: z.boolean(),
+  }),
+  retry: { maxAttempts: 1, backoffMs: 100 },
+  timeoutMs: 5_000,
+  redaction: {},
+  description: "Demonstrates the deprecated OpenAPI flag for public enqueue paths.",
+  deprecated: true,
+});
+
 /** Always fails — DLQ / retry policy tests in later slices. */
 export const exampleFailJob = defineJob({
   name: "example.fail",

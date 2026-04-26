@@ -117,6 +117,31 @@ authDescribe("API auth", () => {
     expect(after.status).toBe(401);
   });
 
+  it("allows viewers to load OpenAPI JSON and Scalar docs", async () => {
+    await prisma.user.create({
+      data: {
+        email: "docs@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "docs@example.com", password: "pw" }),
+    });
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+
+    const oas = await app.request("/api/v1/openapi.json", { headers: { Cookie: cookie } });
+    expect(oas.status).toBe(200);
+    const spec = (await oas.json()) as { paths?: unknown };
+    expect(spec.paths).toBeDefined();
+
+    const docs = await app.request("/api/v1/docs", { headers: { Cookie: cookie } });
+    expect(docs.status).toBe(200);
+    expect((docs.headers.get("content-type") || "").toLowerCase()).toContain("text/html");
+  });
+
   it("distinguishes viewer vs admin on protected routes", async () => {
     await prisma.user.create({
       data: {

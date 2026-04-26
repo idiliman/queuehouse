@@ -34,6 +34,7 @@ describe("job registry", () => {
     const names = listRegisteredJobs().map((j) => j.name);
     expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b)));
     expect(names).toEqual([
+      "example.deprecated",
       "example.fail",
       "example.progress",
       "example.success",

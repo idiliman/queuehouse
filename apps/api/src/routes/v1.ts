@@ -9,12 +9,10 @@ import {
   revokeBrowserSession,
   resolveSessionUser,
 } from "../auth/session";
-import type { SessionUser } from "../auth/session";
+import type { ApiVariables } from "../api-types";
+import { createApiDocsApp } from "../openapi/api-docs";
 
-export type ApiVariables = {
-  requestId: string;
-  user?: SessionUser;
-};
+export type { ApiVariables };
 
 const allowedOrigins = corsAllowedOrigins(config);
 
@@ -99,3 +97,5 @@ v1.get("/protected/admin", async (c) => {
   }
   return c.json({ ok: true, role: user.role });
 });
+
+v1.route("/", createApiDocsApp());

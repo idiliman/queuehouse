@@ -14,6 +14,7 @@ export {
   JOB_CAPABILITY,
   clearJobRegistryForTests,
   defineJob,
+  exampleDeprecatedJob,
   exampleFailJob,
   exampleProgressJob,
   exampleSuccessJob,

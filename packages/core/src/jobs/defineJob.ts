@@ -16,6 +16,7 @@ export type DefineJobOptions = {
   timeoutMs?: number;
   redaction?: JobRedactionMeta;
   description?: string;
+  deprecated?: boolean;
 };
 
 export function defineJob(opts: DefineJobOptions): RegisteredJob {
@@ -36,6 +37,7 @@ export function defineJob(opts: DefineJobOptions): RegisteredJob {
     timeoutMs: opts.timeoutMs,
     redaction,
     description: opts.description?.trim() || undefined,
+    deprecated: opts.deprecated,
   };
 
   return job;

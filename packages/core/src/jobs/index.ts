@@ -1,5 +1,6 @@
 export { defineJob, type DefineJobOptions } from "./defineJob";
 export {
+  exampleDeprecatedJob,
   exampleFailJob,
   exampleProgressJob,
   exampleSuccessJob,
