@@ -609,6 +609,100 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     });
   });
 
+  it("bulk DLQ: GET /admin/bulk-dlq-targets previews failed jobs for current filters (admin only)", async () => {
+    await prisma.user.create({
+      data: {
+        email: "admin-bulk-tg@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    await prisma.user.create({
+      data: {
+        email: "viewer-bulk-tg@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    const adminLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin-bulk-tg@example.com", password: "pw" }),
+    });
+    expect(adminLogin.status).toBe(200);
+    const adminCookie = cookiePairFromSetCookie(adminLogin.headers.get("set-cookie")!);
+    const vLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "viewer-bulk-tg@example.com", password: "pw" }),
+    });
+    expect(vLogin.status).toBe(200);
+    const viewerCookie = cookiePairFromSetCookie(vLogin.headers.get("set-cookie")!);
+
+    const fromMs = Date.now();
+    const failedTargets: { jobId: string; queueName: string }[] = [];
+    for (let i = 0; i < 2; i++) {
+      const enq = await app.request("/api/v1/jobs/example.dlq/enqueue", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: adminCookie,
+        },
+        body: JSON.stringify({ errorMessage: `preview tg ${i}` }),
+      });
+      expect(enq.status).toBe(200);
+      failedTargets.push((await enq.json()) as { jobId: string; queueName: string });
+    }
+    for (const t of failedTargets) {
+      await waitForJobState(adminCookie, t.queueName, t.jobId, "failed");
+    }
+
+    const denied = await app.request("/api/v1/admin/bulk-dlq-targets", {
+      headers: { Cookie: viewerCookie },
+    });
+    expect(denied.status).toBe(403);
+
+    const preview = await app.request(
+      `/api/v1/admin/bulk-dlq-targets?queue=${encodeURIComponent(
+        failedTargets[0]!.queueName,
+      )}&jobName=example.dlq&from=${fromMs}`,
+      { headers: { Cookie: adminCookie } },
+    );
+    expect(preview.status).toBe(200);
+    const pJson = (await preview.json()) as {
+      cap: number;
+      hasMore: boolean;
+      matchingCount: number;
+      targetCount: number;
+      targets: { queueName: string; jobId: string }[];
+    };
+    expect(pJson.matchingCount).toBe(2);
+    expect(pJson.targetCount).toBe(2);
+    expect(pJson.hasMore).toBe(false);
+    expect(pJson.targets).toEqual(
+      expect.arrayContaining(
+        failedTargets.map((f) => ({ queueName: f.queueName, jobId: f.jobId })),
+      ),
+    );
+
+    const none = await app.request(
+      `/api/v1/admin/bulk-dlq-targets?jobName=example.success&from=${fromMs}`,
+      { headers: { Cookie: adminCookie } },
+    );
+    expect(none.status).toBe(200);
+    const nJson = (await none.json()) as { matchingCount: number; targetCount: number; targets: unknown[] };
+    expect(nJson.matchingCount).toBe(0);
+    expect(nJson.targetCount).toBe(0);
+    expect(nJson.targets).toEqual([]);
+
+    for (const t of failedTargets) {
+      await app.request(
+        `/api/v1/jobs/${encodeURIComponent(t.queueName)}/${encodeURIComponent(t.jobId)}`,
+        { method: "DELETE", headers: { Cookie: adminCookie } },
+      );
+    }
+  });
+
   it("DLQ: enqueue retry override exhausts configured attempts on example.fail", async () => {
     await prisma.user.create({
       data: {

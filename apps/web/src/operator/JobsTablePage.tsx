@@ -74,6 +74,13 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
   const [bulkError, setBulkError] = useState<string | null>(null);
+  const [filterPreviewLoading, setFilterPreviewLoading] = useState(false);
+  const [filterPreview, setFilterPreview] = useState<{
+    targets: { queueName: string; jobId: string }[];
+    matchingCount: number;
+    hasMore: boolean;
+    cap: number;
+  } | null>(null);
 
   useEffect(() => {
     saveJobsTablePrefs(prefs);
@@ -144,6 +151,12 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
 
   const failedOnPage = useMemo(() => sorted.filter((j) => j.state === "failed"), [sorted]);
   const isAdmin = role === "ADMIN";
+  const targetsFromSelection = useCallback((): { queueName: string; jobId: string }[] => {
+    return [...selectedFailed].map((k) => {
+      const i = k.indexOf("\0");
+      return { queueName: k.slice(0, i), jobId: k.slice(i + 1) };
+    });
+  }, [selectedFailed]);
 
   useEffect(() => {
     setSelectedFailed((prev) => {
@@ -158,18 +171,57 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
     });
   }, [failedOnPage]);
 
-  const runBulkDlq = async (action: "retry" | "remove") => {
-    if (selectedFailed.size === 0) return;
+  const runFilterPreview = useCallback(async () => {
     setBulkError(null);
     setBulkMessage(null);
-    const targets = [...selectedFailed].map((k) => {
-      const i = k.indexOf("\0");
-      return { queueName: k.slice(0, i), jobId: k.slice(i + 1) };
-    });
+    setFilterPreview(null);
+    setFilterPreviewLoading(true);
+    try {
+      const res = await fetch(`/api/v1/admin/bulk-dlq-targets?${queryString}`, {
+        credentials: "include",
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        cap?: number;
+        hasMore?: boolean;
+        matchingCount?: number;
+        targets?: { queueName: string; jobId: string }[];
+        error?: string;
+      };
+      if (res.status === 401) {
+        setBulkError("Session expired. Sign in again.");
+        return;
+      }
+      if (res.status === 403) {
+        setBulkError("Only admins can preview bulk targets.");
+        return;
+      }
+      if (!res.ok) {
+        setBulkError(body.error ?? `Preview failed (${res.status}).`);
+        return;
+      }
+      setFilterPreview({
+        cap: body.cap ?? BULK_DLQ_MAX,
+        hasMore: Boolean(body.hasMore),
+        matchingCount: body.matchingCount ?? 0,
+        targets: body.targets ?? [],
+      });
+    } catch {
+      setBulkError("Network error.");
+    } finally {
+      setFilterPreviewLoading(false);
+    }
+  }, [queryString]);
+
+  const runBulkDlq = async (action: "retry" | "remove", targets: { queueName: string; jobId: string }[]) => {
+    if (targets.length === 0) return;
+    setBulkError(null);
+    setBulkMessage(null);
+    const capNote =
+      targets.length >= BULK_DLQ_MAX ? ` (capped at ${BULK_DLQ_MAX} per operation)` : "";
     const msg =
       action === "retry"
-        ? `Retry ${targets.length} failed job(s) in place? This enqueues a background bulk operation.`
-        : `Remove ${targets.length} failed job(s) from the queue? This cannot be undone.`;
+        ? `Retry ${targets.length} failed job(s) in place?${capNote} This enqueues a background bulk operation.`
+        : `Remove ${targets.length} failed job(s) from the queue?${capNote} This cannot be undone.`;
     if (!window.confirm(msg)) return;
     setBulkBusy(true);
     try {
@@ -205,6 +257,7 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
         `Bulk ${action} enqueued (system job ${body.jobId} on ${body.queueName}). Audit and job list will update when processing finishes.`,
       );
       setSelectedFailed(new Set());
+      setFilterPreview(null);
       void runFetch();
     } catch {
       setBulkError("Network error.");
@@ -360,6 +413,63 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
           {loading ? "Loading…" : "Refresh"}
         </button>
       </form>
+      {isAdmin ? (
+        <div
+          style={{
+            marginBottom: "0.75rem",
+            padding: "0.5rem 0.65rem",
+            background: "#f4f4ff",
+            border: "1px solid #c8c8e6",
+            borderRadius: 4,
+            fontSize: "0.85rem",
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>Filter-based bulk (failed only) </span>
+          <span style={{ color: "#444" }}>
+            Respects the fields above; only failed jobs are included, newest first, up to {BULK_DLQ_MAX} per run. The State field does not change which failed jobs are chosen.
+          </span>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginTop: "0.45rem" }}>
+            <button
+              type="button"
+              disabled={filterPreviewLoading || bulkBusy}
+              style={inputStyle}
+              onClick={() => void runFilterPreview()}
+            >
+              {filterPreviewLoading ? "…" : "Preview targets"}
+            </button>
+            {filterPreview ? (
+              <>
+                <span>
+                  {filterPreview.matchingCount === 0
+                    ? "No failed jobs match these filters."
+                    : filterPreview.hasMore
+                      ? `${filterPreview.matchingCount} failed job(s) match; ${filterPreview.targets.length} will be enqueued (cap ${filterPreview.cap}, newest first; more than ${filterPreview.cap} match).`
+                      : `${filterPreview.matchingCount} failed job(s) match; up to ${filterPreview.targets.length} will be enqueued.`}
+                </span>
+                <button
+                  type="button"
+                  disabled={bulkBusy || filterPreview.targets.length === 0}
+                  style={{ ...inputStyle, background: "#1a4d1a", color: "#fff", borderColor: "#1a4d1a" }}
+                  onClick={() => void runBulkDlq("retry", filterPreview.targets)}
+                >
+                  {bulkBusy ? "…" : "Bulk retry (from filters)"}
+                </button>
+                <button
+                  type="button"
+                  disabled={bulkBusy || filterPreview.targets.length === 0}
+                  style={{ ...inputStyle, background: "#7a1f1f", color: "#fff", borderColor: "#7a1f1f" }}
+                  onClick={() => void runBulkDlq("remove", filterPreview.targets)}
+                >
+                  {bulkBusy ? "…" : "Bulk remove (from filters)"}
+                </button>
+                <button type="button" style={inputStyle} onClick={() => setFilterPreview(null)}>
+                  Dismiss preview
+                </button>
+              </>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       {isAdmin && failedOnPage.length > 0 ? (
         <div
           style={{
@@ -404,7 +514,7 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
             type="button"
             disabled={bulkBusy || selectedFailed.size === 0 || selectedFailed.size > BULK_DLQ_MAX}
             style={{ ...inputStyle, background: "#1a4d1a", color: "#fff", borderColor: "#1a4d1a" }}
-            onClick={() => void runBulkDlq("retry")}
+            onClick={() => void runBulkDlq("retry", targetsFromSelection())}
           >
             {bulkBusy ? "…" : "Bulk retry in place"}
           </button>
@@ -412,7 +522,7 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
             type="button"
             disabled={bulkBusy || selectedFailed.size === 0 || selectedFailed.size > BULK_DLQ_MAX}
             style={{ ...inputStyle, background: "#7a1f1f", color: "#fff", borderColor: "#7a1f1f" }}
-            onClick={() => void runBulkDlq("remove")}
+            onClick={() => void runBulkDlq("remove", targetsFromSelection())}
           >
             {bulkBusy ? "…" : "Bulk remove"}
           </button>

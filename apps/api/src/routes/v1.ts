@@ -33,6 +33,7 @@ import {
   getBullJobName,
   getJobDetail,
   getUnredactedPayloadResult,
+  listFailedTargetsForBulkDlq,
   listJobs,
   listQueuesAndWorkers,
   pauseRegisteredQueue,
@@ -646,6 +647,72 @@ v1.get("/jobs", async (c) => {
     jobs = jobs.filter((j) => j.jobName && k.allowedJobTypes.includes(j.jobName));
   }
   return c.json({ jobs });
+});
+
+/**
+ * Admin: preview which failed jobs would be included in a filter-based bulk DLQ run (newest first, cap {@link BULK_DLQ_MAX_TARGETS}). Same query params as `GET /jobs` except `state` is ignored; only failed jobs are resolved. API keys: admin scope; job list filtered to allowed job types.
+ */
+v1.get("/admin/bulk-dlq-targets", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" as const }, 401);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  if (!hasApiKeyScope(c, "admin")) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  const sp = c.req.query();
+  const n = (v: string | undefined) => (v != null && v !== "" ? Number(v) : undefined);
+  const from = n(sp.from);
+  const to = n(sp.to);
+  if (from != null && Number.isNaN(from)) {
+    return c.json({ error: "invalid_from" as const }, 400);
+  }
+  if (to != null && Number.isNaN(to)) {
+    return c.json({ error: "invalid_to" as const }, 400);
+  }
+  const minAttempts = n(sp.minAttempts);
+  const maxAttempts = n(sp.maxAttempts);
+  if (minAttempts != null && Number.isNaN(minAttempts)) {
+    return c.json({ error: "invalid_minAttempts" as const }, 400);
+  }
+  if (maxAttempts != null && Number.isNaN(maxAttempts)) {
+    return c.json({ error: "invalid_maxAttempts" as const }, 400);
+  }
+  const redis = getQueuehouseRedis(config);
+  const k = c.get("apiKey");
+  const allowedJobTypes = k ? k.allowedJobTypes : null;
+  const { targets, hasMore, matchingCount } = await listFailedTargetsForBulkDlq(redis, config, {
+    queue: sp.queue,
+    state: sp.state,
+    jobName: sp.jobName,
+    jobId: sp.jobId,
+    schedulerId: sp.schedulerId,
+    from,
+    to,
+    minAttempts,
+    maxAttempts,
+  }, BULK_DLQ_MAX_TARGETS, allowedJobTypes);
+  return c.json({
+    cap: BULK_DLQ_MAX_TARGETS,
+    hasMore,
+    matchingCount,
+    targetCount: targets.length,
+    targets,
+    filters: {
+      queue: sp.queue,
+      state: sp.state,
+      jobName: sp.jobName,
+      jobId: sp.jobId,
+      schedulerId: sp.schedulerId,
+      from: sp.from,
+      to: sp.to,
+      minAttempts: sp.minAttempts,
+      maxAttempts: sp.maxAttempts,
+    },
+  });
 });
 
 /**

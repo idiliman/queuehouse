@@ -455,6 +455,34 @@ export type ListJobsQuery = {
   limit: number;
 };
 
+/** Job-list filters without pagination; used for bulk DLQ target resolution. */
+export type ListJobsFilterQuery = Omit<ListJobsQuery, "limit">;
+
+const FAILED_FETCH_END = 1999; // 2000 failed jobs per queue: upper bound for filter-based bulk
+
+type JobListFilterFields = Pick<
+  ListJobsQuery,
+  "jobName" | "jobId" | "schedulerId" | "from" | "to" | "minAttempts" | "maxAttempts"
+>;
+
+function jobMatchesListFilters(
+  job: Job,
+  _queueName: string,
+  q: JobListFilterFields,
+): boolean {
+  const id = String(job.id);
+  const data = job.data as { jobName?: string };
+  const jn = data.jobName;
+  if (q.jobName && jn !== q.jobName) return false;
+  if (q.jobId && id !== q.jobId) return false;
+  if (q.schedulerId && (job.repeatJobKey ?? "") !== q.schedulerId) return false;
+  if (q.from != null && job.timestamp < q.from) return false;
+  if (q.to != null && job.timestamp > q.to) return false;
+  if (q.minAttempts != null && job.attemptsMade < q.minAttempts) return false;
+  if (q.maxAttempts != null && job.attemptsMade > q.maxAttempts) return false;
+  return true;
+}
+
 export type JobListItem = {
   jobId: string;
   queueName: string;
@@ -512,15 +540,9 @@ export async function listJobs(
     const dedupe = `${queueName}\0${id}`;
     if (seen.has(dedupe)) continue;
     seen.add(dedupe);
+    if (!jobMatchesListFilters(job, queueName, q)) continue;
     const data = job.data as { jobName?: string };
     const jn = data.jobName;
-    if (q.jobName && jn !== q.jobName) continue;
-    if (q.jobId && id !== q.jobId) continue;
-    if (q.schedulerId && (job.repeatJobKey ?? "") !== q.schedulerId) continue;
-    if (q.from != null && job.timestamp < q.from) continue;
-    if (q.to != null && job.timestamp > q.to) continue;
-    if (q.minAttempts != null && job.attemptsMade < q.minAttempts) continue;
-    if (q.maxAttempts != null && job.attemptsMade > q.maxAttempts) continue;
     const state = await job.getState();
     rows.push({
       jobId: id,
@@ -540,6 +562,69 @@ export async function listJobs(
 
   rows.sort((a, b) => (b.created ?? 0) - (a.created ?? 0));
   return rows.slice(0, q.limit);
+}
+
+/**
+ * Failed jobs (newest first) for bulk DLQ, matching the same field filters as {@link listJobs}. The
+ * `state` request field is ignored; only BullMQ "failed" jobs are considered. Scans at most 2000
+ * failed jobs per registered queue, then takes up to `maxTargets`.
+ */
+export async function listFailedTargetsForBulkDlq(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  q: ListJobsFilterQuery,
+  maxTargets: number,
+  /** `null` for session auth (no job-type restriction). Non-null for API keys: must be in this list. */
+  allowedJobTypes: string[] | null,
+): Promise<{
+  targets: { queueName: string; jobId: string }[];
+  hasMore: boolean;
+  /** Failed jobs matching filters before applying `maxTargets` (no higher than the scan cap). */
+  matchingCount: number;
+}> {
+  const regQueues = new Set<string>();
+  for (const j of listRegisteredJobs()) {
+    regQueues.add(j.queue);
+  }
+  const targetQueues: string[] = [];
+  if (q.queue?.trim()) {
+    if (!regQueues.has(q.queue.trim())) {
+      return { targets: [], hasMore: false, matchingCount: 0 };
+    }
+    targetQueues.push(q.queue.trim());
+  } else {
+    targetQueues.push(...[...regQueues].sort());
+  }
+
+  type Row = { created: number; queueName: string; jobId: string; jobName?: string };
+  const rows: Row[] = [];
+  const seen = new Set<string>();
+  for (const queueName of targetQueues) {
+    const queue = getOrCreateQueue(redis, config, queueName);
+    const batch = await queue.getJobs(["failed"], 0, FAILED_FETCH_END, false);
+    for (const job of batch) {
+      if (!job?.id) continue;
+      const id = String(job.id);
+      const dedupe = `${queueName}\0${id}`;
+      if (seen.has(dedupe)) continue;
+      if (!jobMatchesListFilters(job, queueName, q)) continue;
+      const data = job.data as { jobName?: string };
+      const jn = data.jobName;
+      if (allowedJobTypes !== null) {
+        if (!jn || !allowedJobTypes.includes(jn)) continue;
+      }
+      seen.add(dedupe);
+      rows.push({ created: job.timestamp, queueName, jobId: id, jobName: jn });
+    }
+  }
+  rows.sort((a, b) => b.created - a.created);
+  const matchingCount = rows.length;
+  const hasMore = matchingCount > maxTargets;
+  return {
+    targets: rows.slice(0, maxTargets).map((r) => ({ queueName: r.queueName, jobId: r.jobId })),
+    hasMore,
+    matchingCount,
+  };
 }
 
 export type JobDetailResult = {
