@@ -5,6 +5,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type ReactNode,
 } from "react";
 import { Link } from "react-router-dom";
 import { loadJobsTablePrefs, saveJobsTablePrefs, type JobsTablePrefs } from "./jobsPrefs";
@@ -72,7 +73,7 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
   const [loading, setLoading] = useState(false);
   const [selectedFailed, setSelectedFailed] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
-  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [bulkMessage, setBulkMessage] = useState<ReactNode | null>(null);
   const [bulkError, setBulkError] = useState<string | null>(null);
   const [filterPreviewLoading, setFilterPreviewLoading] = useState(false);
   const [filterPreview, setFilterPreview] = useState<{
@@ -221,7 +222,7 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
     const msg =
       action === "retry"
         ? `Retry ${targets.length} failed job(s) in place?${capNote} This enqueues a background bulk operation.`
-        : `Remove ${targets.length} failed job(s) from the queue?${capNote} This cannot be undone.`;
+        : `Delete ${targets.length} failed job(s) (discard; remove from the failed set)?${capNote} This cannot be undone.`;
     if (!window.confirm(msg)) return;
     setBulkBusy(true);
     try {
@@ -253,8 +254,30 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
         }
         return;
       }
+      const jq = body.jobId != null && body.jobId !== "" && body.queueName;
       setBulkMessage(
-        `Bulk ${action} enqueued (system job ${body.jobId} on ${body.queueName}). Audit and job list will update when processing finishes.`,
+        <>
+          Bulk {action === "retry" ? "retry" : "delete (discard)"} enqueued.{" "}
+          {jq ? (
+            <>
+              Open the{" "}
+              <Link
+                to={`/jobs/${encodeURIComponent(String(body.queueName))}/${encodeURIComponent(String(body.jobId))}`}
+                style={{ color: "#0b4d0b", fontWeight: 600, textDecoration: "underline" }}
+              >
+                system job
+              </Link>{" "}
+              to watch live progress, or use{" "}
+            </>
+          ) : null}
+          <Link
+            to="/admin-ops"
+            style={{ color: "#0b4d0b", fontWeight: 600, textDecoration: "underline" }}
+          >
+            Admin operations
+          </Link>{" "}
+          for enqueue/completion rows. The jobs list refreshes as work completes.
+        </>,
       );
       setSelectedFailed(new Set());
       setFilterPreview(null);
@@ -426,7 +449,9 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
         >
           <span style={{ fontWeight: 600 }}>Filter-based bulk (failed only) </span>
           <span style={{ color: "#444" }}>
-            Respects the fields above; only failed jobs are included, newest first, up to {BULK_DLQ_MAX} per run. The State field does not change which failed jobs are chosen.
+            Respects the fields above; only failed jobs are included, newest first, up to {BULK_DLQ_MAX} per run. The
+            State field does not change which failed jobs are chosen. <strong>Delete</strong> removes failed jobs
+            (discards; same as a single failed-job delete) without retry; <strong>Retry</strong> requeues in place.
           </span>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginTop: "0.45rem" }}>
             <button
@@ -460,7 +485,7 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
                   style={{ ...inputStyle, background: "#7a1f1f", color: "#fff", borderColor: "#7a1f1f" }}
                   onClick={() => void runBulkDlq("remove", filterPreview.targets)}
                 >
-                  {bulkBusy ? "…" : "Bulk remove (from filters)"}
+                  {bulkBusy ? "…" : "Bulk delete (from filters)"}
                 </button>
                 <button type="button" style={inputStyle} onClick={() => setFilterPreview(null)}>
                   Dismiss preview
@@ -524,7 +549,7 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
             style={{ ...inputStyle, background: "#7a1f1f", color: "#fff", borderColor: "#7a1f1f" }}
             onClick={() => void runBulkDlq("remove", targetsFromSelection())}
           >
-            {bulkBusy ? "…" : "Bulk remove"}
+            {bulkBusy ? "…" : "Bulk delete (discard)"}
           </button>
           {failedOnPage.length > BULK_DLQ_MAX ? (
             <span style={{ color: "#664d00" }}>

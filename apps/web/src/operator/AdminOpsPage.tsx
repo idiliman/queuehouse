@@ -44,6 +44,12 @@ function summaryRecord(s: unknown): Record<string, unknown> {
   return s != null && typeof s === "object" && !Array.isArray(s) ? (s as Record<string, unknown>) : {};
 }
 
+/** Maps stored `remove` to operator-facing "delete" (#18: retry / discard / delete). */
+function bulkDlqActionLabel(a: string): string {
+  if (a === "remove") return "delete";
+  return a;
+}
+
 /**
  * Bulk DLQ system jobs: enqueue + completion rows from the audit log (session-only API).
  */
@@ -130,7 +136,10 @@ export function AdminOpsPage() {
             <tbody>
               {items.map((row) => {
                 const sum = summaryRecord(row.summary);
-                const op = sum.action === "retry" || sum.action === "remove" ? String(sum.action) : "—";
+                const op =
+                  sum.action === "retry" || sum.action === "remove"
+                    ? bulkDlqActionLabel(String(sum.action))
+                    : "—";
                 const isComplete = row.action === AUDIT_ACTION_BULK_DLQ_COMPLETE;
                 const counts = isComplete ? (
                   <>
