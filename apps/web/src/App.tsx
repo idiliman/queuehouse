@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { ApiKeysPage } from "./operator/ApiKeysPage";
 import { JobDetailPage } from "./operator/JobDetailPage";
 import { JobsTablePage } from "./operator/JobsTablePage";
 
@@ -103,6 +104,11 @@ export function App() {
             <Link to="/dlq" style={navStyle}>
               DLQ
             </Link>
+            {user.role === "ADMIN" ? (
+              <Link to="/api-keys" style={navStyle}>
+                API keys
+              </Link>
+            ) : null}
           </nav>
         ) : null}
       </header>
@@ -190,6 +196,18 @@ export function App() {
             user ? (
               <section style={{ marginTop: "1.5rem" }}>
                 <JobsTablePage initialState="failed" />
+              </section>
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
+        <Route
+          path="/api-keys"
+          element={
+            user?.role === "ADMIN" ? (
+              <section style={{ marginTop: "1.5rem" }}>
+                <ApiKeysPage />
               </section>
             ) : (
               <Navigate to="/" replace />

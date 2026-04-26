@@ -377,6 +377,22 @@ export type JobDetailResult = {
   resolvedRetry?: { maxAttempts: number; backoffMs?: number };
 };
 
+/**
+ * Resolves the registry `jobName` stored in Bull data (for API key allow-list checks).
+ */
+export async function getBullJobName(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  queueName: string,
+  jobId: string,
+): Promise<string | undefined> {
+  const queue = getOrCreateQueue(redis, config, queueName);
+  const job: Job | undefined = await queue.getJob(jobId);
+  if (!job) return undefined;
+  const data = job.data as { jobName?: string };
+  return data.jobName;
+}
+
 export async function getJobDetail(
   redis: IORedis,
   config: QueuehouseConfig,

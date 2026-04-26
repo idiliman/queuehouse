@@ -21,6 +21,7 @@ model User {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   sessions     Session[]
+  apiKeys      ApiKey[]
 }
 
 model Session {
@@ -30,6 +31,27 @@ model Session {
   tokenHash String   @unique
   expiresAt DateTime
   createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/**
+ * API keys: secret shown once; only tokenHash (SHA-256) is stored.
+ * Scopes: read, enqueue, admin (admin requires owner UserRole.ADMIN and job allow-list checks).
+ */
+model ApiKey {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String?
+  tokenHash       String    @unique
+  /// e.g. "read", "enqueue", "admin"
+  scopes          String[]
+  /// Registered job `name` values this key may touch (read/enqueue/admin per route rules).
+  allowedJobTypes String[]
+  createdAt       DateTime  @default(now())
+  revokedAt       DateTime?
+  lastUsedAt      DateTime?
 
   @@index([userId])
 }

@@ -194,4 +194,74 @@ authDescribe("API auth", () => {
     });
     expect(res.headers.get("X-Request-Id")).toBe("req_auth_1");
   });
+
+  it("rejects invalid Bearer API keys with invalid_token", async () => {
+    const notShape = await app.request("/api/v1/jobs", {
+      headers: { Authorization: "Bearer notqh_notvalid" },
+    });
+    expect(notShape.status).toBe(401);
+    const a = (await notShape.json()) as { error: string };
+    expect(a.error).toBe("invalid_token");
+
+    const unknown = await app.request("/api/v1/jobs", {
+      headers: { Authorization: "Bearer qh_123456789012345678901234567890ab" },
+    });
+    expect(unknown.status).toBe(401);
+  });
+
+  it("creates an API key as admin and uses Bearer for GET /api/v1/jobs", async () => {
+    await prisma.user.create({
+      data: {
+        email: "keyadmin@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "keyadmin@example.com", password: "pw" }),
+    });
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+
+    const create = await app.request("/api/v1/api-keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        name: "test",
+        scopes: ["read"],
+        allowedJobTypes: ["example.success"],
+      }),
+    });
+    expect(create.status).toBe(201);
+    const created = (await create.json()) as { token: string };
+    const jobs = await app.request("/api/v1/jobs?limit=3", {
+      headers: { Authorization: `Bearer ${created.token}` },
+    });
+    expect(jobs.status).toBe(200);
+    const list = (await jobs.json()) as { jobs: unknown[] };
+    expect(list.jobs).toBeDefined();
+  });
+
+  it("rejects non-admins for POST /api/v1/api-keys", async () => {
+    await prisma.user.create({
+      data: {
+        email: "noviewkeys@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "noviewkeys@example.com", password: "pw" }),
+    });
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const res = await app.request("/api/v1/api-keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ scopes: ["read"], allowedJobTypes: ["example.success"] }),
+    });
+    expect(res.status).toBe(403);
+  });
 });

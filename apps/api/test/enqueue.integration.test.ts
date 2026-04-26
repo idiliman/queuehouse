@@ -202,6 +202,43 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     expect(res.status).toBe(401);
   });
 
+  it("enqueues example.success with Bearer API key (enqueue + read, allow list)", async () => {
+    await prisma.user.create({
+      data: {
+        email: "key-enqueue@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "key-enqueue@example.com", password: "pw" }),
+    });
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const create = await app.request("/api/v1/api-keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        scopes: ["enqueue", "read"],
+        allowedJobTypes: [exampleSuccessJob.name],
+      }),
+    });
+    expect(create.status).toBe(201);
+    const { token } = (await create.json()) as { token: string };
+    const reqId = "req_bearer_enqueue_1";
+    const enqueue = await app.request("/api/v1/jobs/example.success/enqueue", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        "X-Request-Id": reqId,
+      },
+      body: JSON.stringify({ message: "via-bearer" }),
+    });
+    expect(enqueue.status).toBe(200);
+  });
+
   async function waitForJobState(
     cookie: string,
     queueName: string,

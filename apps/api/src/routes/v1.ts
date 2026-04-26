@@ -1,17 +1,21 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
+import { listRegisteredJobs } from "@queuehouse/core";
 import { prisma } from "@queuehouse/db";
 import { config } from "../config";
 import { corsAllowedOrigins } from "../cors";
+import { newApiKeyToken } from "../auth/api-key-crypto";
+import { hasApiKeyScope, isApiKeyJobAllowed } from "../auth/api-key-policy";
+import { applyAuth } from "../auth/resolve-auth";
 import {
   createBrowserSession,
   DEFAULT_SESSION_MAX_AGE_SEC,
   revokeBrowserSession,
-  resolveSessionUser,
 } from "../auth/session";
 import type { ApiVariables } from "../api-types";
 import {
+  getBullJobName,
   getJobDetail,
   listJobs,
   removeFailedJob,
@@ -33,14 +37,17 @@ if (allowedOrigins.length > 0) {
     cors({
       origin: allowedOrigins,
       allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "X-Request-Id"],
+      allowHeaders: ["Content-Type", "X-Request-Id", "Authorization"],
       credentials: true,
     }),
   );
 }
 
 v1.use(async (c, next) => {
-  c.set("user", (await resolveSessionUser(c, config)) ?? undefined);
+  const r = await applyAuth(c, config);
+  if (r === "invalid_bearer") {
+    return c.json({ error: "invalid_token" as const }, 401);
+  }
   await next();
 });
 
@@ -107,6 +114,125 @@ v1.get("/protected/admin", async (c) => {
   return c.json({ ok: true, role: user.role });
 });
 
+const createApiKeyBody = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    scopes: z.array(z.enum(["read", "enqueue", "admin"])).min(1),
+    allowedJobTypes: z.array(z.string().min(1)).min(0),
+  })
+  .strict();
+
+/** Build UI picklists: registered job names and descriptions. Admin session only. */
+v1.get("/meta/registered-jobs", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (c.get("apiKey")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  return c.json({
+    jobs: listRegisteredJobs().map((j) => ({ name: j.name, description: j.description })),
+  });
+});
+
+v1.post("/api-keys", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (c.get("apiKey")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  let body: z.infer<typeof createApiKeyBody>;
+  try {
+    const raw = await c.req.json();
+    body = createApiKeyBody.parse(raw);
+  } catch (err) {
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  const { token, tokenHash } = newApiKeyToken();
+  const row = await prisma.apiKey.create({
+    data: {
+      userId: user.id,
+      name: body.name,
+      tokenHash,
+      scopes: body.scopes,
+      allowedJobTypes: body.allowedJobTypes,
+    },
+  });
+  return c.json(
+    {
+      token,
+      apiKey: {
+        id: row.id,
+        name: row.name,
+        createdAt: row.createdAt,
+        scopes: row.scopes,
+        allowedJobTypes: row.allowedJobTypes,
+      },
+    },
+    201,
+  );
+});
+
+v1.get("/api-keys", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (c.get("apiKey")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const keys = await prisma.apiKey.findMany({
+    where: { userId: user.id },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      name: true,
+      createdAt: true,
+      scopes: true,
+      allowedJobTypes: true,
+      revokedAt: true,
+    },
+  });
+  return c.json({ apiKeys: keys });
+});
+
+v1.delete("/api-keys/:id", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (c.get("apiKey")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const id = c.req.param("id");
+  const r = await prisma.apiKey.updateMany({
+    where: { id, userId: user.id, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+  if (r.count === 0) {
+    return c.json({ error: "not_found" as const }, 404);
+  }
+  return c.body(null, 204);
+});
+
 /**
  * List jobs (recent slice per queue/state). Requires auth. Does not return raw payload.
  * Query: queue, state (comma list), jobName, jobId, schedulerId, from, to, minAttempts, maxAttempts, limit
@@ -115,6 +241,9 @@ v1.get("/jobs", async (c) => {
   const user = c.get("user");
   if (!user) {
     return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (!hasApiKeyScope(c, "read")) {
+    return c.json({ error: "forbidden" }, 403);
   }
   const sp = c.req.query();
   const limitParsed = sp.limit != null && sp.limit !== "" ? parseInt(sp.limit, 10) : 50;
@@ -138,7 +267,7 @@ v1.get("/jobs", async (c) => {
     return c.json({ error: "invalid_maxAttempts" }, 400);
   }
   const redis = getQueuehouseRedis(config);
-  const jobs = await listJobs(redis, config, {
+  let jobs = await listJobs(redis, config, {
     queue: sp.queue,
     state: sp.state,
     jobName: sp.jobName,
@@ -150,6 +279,10 @@ v1.get("/jobs", async (c) => {
     maxAttempts,
     limit,
   });
+  const k = c.get("apiKey");
+  if (k) {
+    jobs = jobs.filter((j) => j.jobName && k.allowedJobTypes.includes(j.jobName));
+  }
   return c.json({ jobs });
 });
 
@@ -161,9 +294,21 @@ v1.get("/jobs/:queueName/:jobId", async (c) => {
   if (!user) {
     return c.json({ error: "unauthenticated" }, 401);
   }
+  if (!hasApiKeyScope(c, "read")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
   const queueName = c.req.param("queueName");
   const jobId = c.req.param("jobId");
   const redis = getQueuehouseRedis(config);
+  if (c.get("apiKey")) {
+    const jn = await getBullJobName(redis, config, queueName, jobId);
+    if (!jn) {
+      return c.json({ error: "job_not_found" }, 404);
+    }
+    if (!isApiKeyJobAllowed(c, jn)) {
+      return c.json({ error: "forbidden" }, 403);
+    }
+  }
   const detail = await getJobDetail(redis, config, queueName, jobId);
   if (!detail) {
     return c.json({ error: "job_not_found" }, 404);
@@ -179,9 +324,16 @@ v1.post("/jobs/:queueName/:jobId/retry", async (c) => {
   if (user.role !== "ADMIN") {
     return c.json({ error: "forbidden" }, 403);
   }
+  if (!hasApiKeyScope(c, "admin")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
   const queueName = c.req.param("queueName");
   const jobId = c.req.param("jobId");
   const redis = getQueuehouseRedis(config);
+  const jn = await getBullJobName(redis, config, queueName, jobId);
+  if (jn && c.get("apiKey") && !isApiKeyJobAllowed(c, jn)) {
+    return c.json({ error: "forbidden" }, 403);
+  }
   const result = await retryFailedJobInPlace(redis, config, queueName, jobId);
   if ("error" in result) {
     if (result.error === "job_not_found") {
@@ -207,6 +359,9 @@ v1.post("/jobs/:queueName/:jobId/retry-as-new", async (c) => {
   if (user.role !== "ADMIN") {
     return c.json({ error: "forbidden" }, 403);
   }
+  if (!hasApiKeyScope(c, "admin")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
   const queueName = c.req.param("queueName");
   const jobId = c.req.param("jobId");
   let body: unknown;
@@ -217,6 +372,10 @@ v1.post("/jobs/:queueName/:jobId/retry-as-new", async (c) => {
   }
   const requestId = c.get("requestId");
   const redis = getQueuehouseRedis(config);
+  const jn0 = await getBullJobName(redis, config, queueName, jobId);
+  if (jn0 && c.get("apiKey") && !isApiKeyJobAllowed(c, jn0)) {
+    return c.json({ error: "forbidden" }, 403);
+  }
   function isZodIssuesError(err: unknown): err is { issues: unknown } {
     return (
       typeof err === "object" &&
@@ -279,9 +438,16 @@ v1.delete("/jobs/:queueName/:jobId", async (c) => {
   if (user.role !== "ADMIN") {
     return c.json({ error: "forbidden" }, 403);
   }
+  if (!hasApiKeyScope(c, "admin")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
   const queueName = c.req.param("queueName");
   const jobId = c.req.param("jobId");
   const redis = getQueuehouseRedis(config);
+  const jn = await getBullJobName(redis, config, queueName, jobId);
+  if (jn && c.get("apiKey") && !isApiKeyJobAllowed(c, jn)) {
+    return c.json({ error: "forbidden" }, 403);
+  }
   const result = await removeFailedJob(redis, config, queueName, jobId);
   if ("error" in result) {
     if (result.error === "job_not_found") {

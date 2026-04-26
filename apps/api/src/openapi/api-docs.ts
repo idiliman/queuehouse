@@ -11,6 +11,7 @@ import {
   type RegisteredJob,
 } from "@queuehouse/core";
 import type { ApiVariables } from "../api-types";
+import { hasApiKeyScope, isApiKeyJobAllowed } from "../auth/api-key-policy";
 import { enqueueAuthenticatedJob } from "../bullmq/queuehouse-queue";
 import { getQueuehouseRedis } from "../bullmq/redis";
 
@@ -218,6 +219,9 @@ export function createApiDocsApp(
     });
     app.openapi(route, async (c) => {
       const user = c.get("user")!;
+      if (!hasApiKeyScope(c, "enqueue") || !isApiKeyJobAllowed(c, job.name)) {
+        return c.json({ error: "enqueue_not_allowed" as const }, 403);
+      }
       const parsed = await readEnqueueJsonBody(c);
       if ("error" in parsed) {
         return c.json({ error: "invalid_json" as const }, 400);
@@ -314,6 +318,9 @@ export function createApiDocsApp(
     const jobName = typeof envelope?.jobName === "string" ? envelope.jobName : "";
     if (!jobName) {
       return c.json({ error: "validation_failed" as const, issues: [{ message: "jobName required" }] }, 400);
+    }
+    if (!hasApiKeyScope(c, "enqueue") || !isApiKeyJobAllowed(c, jobName)) {
+      return c.json({ error: "enqueue_not_allowed" as const }, 403);
     }
     const requestId = c.get("requestId")!;
     const redis = getQueuehouseRedis(cfg);
