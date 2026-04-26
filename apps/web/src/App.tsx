@@ -7,6 +7,7 @@ import {
 } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { ApiKeysPage } from "./operator/ApiKeysPage";
+import { ManualEnqueuePage } from "./operator/ManualEnqueuePage";
 import { AuditLogPage } from "./operator/AuditLogPage";
 import { JobDetailPage } from "./operator/JobDetailPage";
 import { JobsTablePage } from "./operator/JobsTablePage";
@@ -107,6 +108,9 @@ export function App() {
             </Link>
             {user.role === "ADMIN" ? (
               <>
+                <Link to="/enqueue" style={navStyle}>
+                  Enqueue
+                </Link>
                 <Link to="/api-keys" style={navStyle}>
                   API keys
                 </Link>
@@ -202,6 +206,18 @@ export function App() {
             user ? (
               <section style={{ marginTop: "1.5rem" }}>
                 <JobsTablePage initialState="failed" />
+              </section>
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
+        <Route
+          path="/enqueue"
+          element={
+            user?.role === "ADMIN" ? (
+              <section style={{ marginTop: "1.5rem" }}>
+                <ManualEnqueuePage />
               </section>
             ) : (
               <Navigate to="/" replace />

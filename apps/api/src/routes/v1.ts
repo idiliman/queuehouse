@@ -1,7 +1,13 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
-import { listRegisteredJobs } from "@queuehouse/core";
+import {
+  JOB_CAPABILITY,
+  listRegisteredJobs,
+  MANUAL_ENQUEUE_LIMITS,
+  mergePayloadWithRetryForEnqueue,
+  resolveManualEnqueueDelayMs,
+} from "@queuehouse/core";
 import { prisma } from "@queuehouse/db";
 import { config } from "../config";
 import { corsAllowedOrigins } from "../cors";
@@ -16,6 +22,7 @@ import {
 } from "../auth/session";
 import type { ApiVariables } from "../api-types";
 import {
+  enqueueManualUiJob,
   getBullJobName,
   getJobDetail,
   listJobs,
@@ -136,9 +143,266 @@ v1.get("/meta/registered-jobs", async (c) => {
     return c.json({ error: "forbidden" }, 403);
   }
   return c.json({
-    jobs: listRegisteredJobs().map((j) => ({ name: j.name, description: j.description })),
+    jobs: listRegisteredJobs().map((j) => ({
+      name: j.name,
+      description: j.description,
+      manualUi: j.capabilities.includes(JOB_CAPABILITY.MANUAL_UI),
+    })),
   });
 });
+
+const manualEnqueueBody = z
+  .object({
+    jobName: z.string().min(1).max(200),
+    payload: z.unknown(),
+    delay: z.number().int().min(0).max(MANUAL_ENQUEUE_LIMITS.maxDelayMs).optional(),
+    runAt: z.string().max(80).optional(),
+    dedupeKey: z
+      .string()
+      .min(1)
+      .max(200)
+      .refine((k) => k !== "0" && !k.startsWith("0:"), { message: "invalid_dedupeKey" })
+      .optional(),
+    priority: z
+      .number()
+      .int()
+      .min(MANUAL_ENQUEUE_LIMITS.minPriority)
+      .max(MANUAL_ENQUEUE_LIMITS.maxPriority)
+      .optional(),
+    waitTimeoutMs: z
+      .number()
+      .int()
+      .min(0)
+      .max(MANUAL_ENQUEUE_LIMITS.maxWaitTimeoutMs)
+      .optional(),
+    retry: z
+      .object({
+        maxAttempts: z.number().int().optional(),
+        backoffMs: z.number().int().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .refine((b) => !(b.delay != null && b.runAt != null && b.runAt.trim() !== ""), {
+    message: "manual_delay_runAt_exclusive",
+  });
+
+/**
+ * Admin session only: enqueue jobs marked `manual.ui` (includes jobs without public `enqueue.api`).
+ * Supports delay / runAt, dedupe id, priority, retry overrides, optional wait for completion.
+ */
+v1.post("/manual-enqueue", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" as const }, 401);
+  }
+  if (c.get("apiKey")) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  let body: z.infer<typeof manualEnqueueBody>;
+  try {
+    const raw = await c.req.json();
+    body = manualEnqueueBody.parse(raw);
+  } catch (err) {
+    if (err instanceof ZodError) {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual" },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "validation_failed",
+      });
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    await recordAudit(c, {
+      action: AUDIT_ACTION.JOB_ENQUEUE,
+      summary: { path: "manual" },
+      result: AUDIT_RESULT.FAILURE,
+      errorCode: "invalid_json",
+    });
+    return c.json({ error: "invalid_json" as const }, 400);
+  }
+
+  const requestId = c.get("requestId")!;
+  const redis = getQueuehouseRedis(config);
+
+  let delayMs: number;
+  try {
+    delayMs = resolveManualEnqueueDelayMs({
+      delay: body.delay,
+      runAt: body.runAt && body.runAt.trim() !== "" ? body.runAt : undefined,
+    });
+  } catch (metaErr) {
+    const code = (metaErr as { code?: string }).code;
+    if (code === "manual_delay_runAt_exclusive" || code === "invalid_runAt" || code === "invalid_delay") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: (code ?? "invalid_schedule") as "manual_delay_runAt_exclusive" | "invalid_runAt" | "invalid_delay" }, 400);
+    }
+    throw metaErr;
+  }
+
+  let inner: unknown;
+  try {
+    inner = mergePayloadWithRetryForEnqueue(body.payload, body.retry);
+  } catch (mergeErr) {
+    const code = (mergeErr as { code?: string }).code;
+    if (code === "retry_with_non_object_payload") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "retry_with_non_object_payload" as const }, 400);
+    }
+    throw mergeErr;
+  }
+
+  const waitTimeoutMs = body.waitTimeoutMs ?? 0;
+
+  try {
+    const out = await enqueueManualUiJob(redis, config, {
+      jobName: body.jobName,
+      body: inner,
+      delayMs,
+      jobId: body.dedupeKey,
+      priority: body.priority,
+      waitTimeoutMs,
+      requestId,
+      user: { id: user.id, role: user.role },
+    });
+    await recordAudit(c, {
+      action: AUDIT_ACTION.JOB_ENQUEUE,
+      summary: {
+        path: "manual",
+        jobName: body.jobName,
+        newJobId: out.jobId,
+        queueName: out.queueName,
+        delayMs,
+        dedupeKey: body.dedupeKey ?? null,
+        waitUsed: waitTimeoutMs > 0,
+        waitCompleted: waitTimeoutMs > 0 && out.result !== undefined,
+      },
+      result: AUDIT_RESULT.SUCCESS,
+    });
+    return c.json({
+      jobId: out.jobId,
+      queueName: out.queueName,
+      requestId,
+      ...(out.result !== undefined ? { result: out.result } : {}),
+    });
+  } catch (err) {
+    if (err instanceof ZodError) {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "validation_failed",
+      });
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    const code = (err as { code?: string }).code;
+    if (code === "unknown_job") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual" },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "unknown_job" as const }, 400);
+    }
+    if (code === "manual_enqueue_not_allowed") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "manual_enqueue_not_allowed" as const }, 403);
+    }
+    if (code === "dedupe_job_id_conflict") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName, dedupeKey: body.dedupeKey },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "dedupe_job_id_conflict" as const }, 409);
+    }
+    if (code === "wait_timeout") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "wait_timeout" as const }, 504);
+    }
+    if (code === "retry_override_not_allowed") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "retry_override_not_allowed" as const }, 400);
+    }
+    if (code === "retry_override_invalid") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "retry_override_invalid" as const }, 400);
+    }
+    if (code === "retry_override_out_of_range") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "retry_override_out_of_range" as const }, 400);
+    }
+    if (code === "retry_with_non_object_payload") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "retry_with_non_object_payload" as const }, 400);
+    }
+    if (isZodIssuesError(err)) {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "manual", jobName: body.jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "validation_failed",
+      });
+      return c.json({ error: "validation_failed" as const, issues: (err as { issues: unknown }).issues }, 400);
+    }
+    throw err;
+  }
+});
+
+function isZodIssuesError(err: unknown): err is { issues: unknown } {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "issues" in err &&
+    Array.isArray((err as { issues: unknown }).issues)
+  );
+}
 
 /**
  * Admin-only, browser session only: paginated audit log (mutations with redacted summaries).

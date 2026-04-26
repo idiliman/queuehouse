@@ -29,6 +29,11 @@ export {
   registerJob,
 } from "./registry";
 export { JOB_CAPABILITY, type JobCapability, type RegisteredJob } from "./types";
+export {
+  MANUAL_ENQUEUE_LIMITS,
+  mergePayloadWithRetryForEnqueue,
+  resolveManualEnqueueDelayMs,
+} from "./manual-enqueue";
 export type {
   JobRedactionMeta,
   JobRetryDefaults,

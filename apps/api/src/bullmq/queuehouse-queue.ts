@@ -1,4 +1,4 @@
-import { Queue, type Job, type JobType } from "bullmq";
+import { Queue, QueueEvents, type Job, type JobType } from "bullmq";
 import type IORedis from "ioredis";
 import {
   bullmqPrefix,
@@ -6,6 +6,7 @@ import {
   getRegisteredJob,
   JOB_CAPABILITY,
   listRegisteredJobs,
+  mergePayloadWithRetryForEnqueue,
   redactObjectAtPaths,
   resolveBullmqRetryForEnqueue,
   splitJobEnqueueBody,
@@ -37,16 +38,6 @@ export type EnqueueAccepted = {
   queueName: string;
 };
 
-function mergeObjectPayloadWithRetry(payload: unknown, retry: unknown): unknown {
-  if (retry === undefined) return payload;
-  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
-    return { ...(payload as Record<string, unknown>), retry };
-  }
-  const e = new Error("retry_with_non_object_payload") as Error & { code?: string };
-  e.code = "retry_with_non_object_payload";
-  throw e;
-}
-
 async function addQueueJob(
   redis: IORedis,
   config: QueuehouseConfig,
@@ -57,9 +48,11 @@ async function addQueueJob(
     requestId: string;
     user: { id: string; role: string };
     retriedAsNewFrom?: { queueName: string; jobId: string };
+    /** BullMQ job options: delay (ms from now), custom id, priority (0 = highest). */
+    schedule?: { delay?: number; jobId?: string; priority?: number };
   },
-): Promise<EnqueueAccepted> {
-  const { job, payload, eff, requestId, user, retriedAsNewFrom } = params;
+): Promise<{ jobId: string; queueName: string; bullJob: Job }> {
+  const { job, payload, eff, requestId, user, retriedAsNewFrom, schedule } = params;
   const queue = getOrCreateQueue(redis, config, job.queue);
   const data: {
     jobName: string;
@@ -76,18 +69,39 @@ async function addQueueJob(
   if (retriedAsNewFrom) {
     data.retriedAsNewFrom = retriedAsNewFrom;
   }
-  const bullJob = await queue.add(job.name, data, {
+  const addOpts: Parameters<Queue["add"]>[2] = {
     attempts: eff.maxAttempts,
     backoff: eff.backoffMs
       ? { type: "fixed" as const, delay: eff.backoffMs }
       : undefined,
     removeOnComplete: { count: 10_000 },
     removeOnFail: false,
-  });
+  };
+  if (schedule?.delay != null && schedule.delay > 0) {
+    addOpts.delay = schedule.delay;
+  }
+  if (schedule?.jobId) {
+    addOpts.jobId = schedule.jobId;
+  }
+  if (schedule?.priority != null) {
+    addOpts.priority = schedule.priority;
+  }
+  let bullJob: Job;
+  try {
+    bullJob = await queue.add(job.name, data, addOpts);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (schedule?.jobId && /exist|Exist|Duplicate|duplicate|collision/i.test(msg)) {
+      const e = new Error("dedupe_job_id_conflict") as Error & { code?: string };
+      e.code = "dedupe_job_id_conflict";
+      throw e;
+    }
+    throw err;
+  }
   if (bullJob.id === undefined || bullJob.id === null) {
     throw new Error("bullmq_missing_job_id");
   }
-  return { jobId: String(bullJob.id), queueName: job.queue };
+  return { jobId: String(bullJob.id), queueName: job.queue, bullJob };
 }
 
 export async function enqueueAuthenticatedJob(
@@ -115,13 +129,90 @@ export async function enqueueAuthenticatedJob(
   job.inputSchema.parse(payload);
 
   const eff = resolveBullmqRetryForEnqueue(job, retryOverride);
-  return addQueueJob(redis, config, {
+  const r = await addQueueJob(redis, config, {
     job: { name: job.name, queue: job.queue },
     payload,
     eff,
     requestId: params.requestId,
     user: params.user,
   });
+  return { jobId: r.jobId, queueName: r.queueName };
+}
+
+export type ManualEnqueueAccepted = EnqueueAccepted & {
+  result?: unknown;
+};
+
+/**
+ * Admin manual-enqueue path: requires `manual.ui` on the job (not `enqueue.api`).
+ * Supports delay, dedupe id, priority, and optional wait-for-completion.
+ */
+export async function enqueueManualUiJob(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  params: {
+    jobName: string;
+    body: unknown;
+    delayMs: number;
+    jobId?: string;
+    priority?: number;
+    waitTimeoutMs: number;
+    requestId: string;
+    user: { id: string; role: string };
+  },
+): Promise<ManualEnqueueAccepted> {
+  const job = getRegisteredJob(params.jobName);
+  if (!job) {
+    const e = new Error("unknown_job") as Error & { code?: string };
+    e.code = "unknown_job";
+    throw e;
+  }
+  if (!job.capabilities.includes(JOB_CAPABILITY.MANUAL_UI)) {
+    const e = new Error("manual_enqueue_not_allowed") as Error & { code?: string };
+    e.code = "manual_enqueue_not_allowed";
+    throw e;
+  }
+  const { payload, retryOverride } = splitJobEnqueueBody(job, params.body);
+  job.inputSchema.parse(payload);
+  const eff = resolveBullmqRetryForEnqueue(job, retryOverride);
+  const schedule: { delay?: number; jobId?: string; priority?: number } = {};
+  if (params.delayMs > 0) schedule.delay = params.delayMs;
+  if (params.jobId) schedule.jobId = params.jobId;
+  if (params.priority != null) schedule.priority = params.priority;
+
+  const prefix = bullmqPrefix(config.namespace);
+  const { bullJob, jobId, queueName } = await addQueueJob(redis, config, {
+    job: { name: job.name, queue: job.queue },
+    payload,
+    eff,
+    requestId: params.requestId,
+    user: params.user,
+    schedule,
+  });
+
+  if (params.waitTimeoutMs <= 0) {
+    return { jobId, queueName };
+  }
+
+  const queueEvents = new QueueEvents(job.queue, { connection: redis, prefix });
+  try {
+    await queueEvents.waitUntilReady();
+    let result: unknown;
+    try {
+      result = await bullJob.waitUntilFinished(queueEvents, params.waitTimeoutMs);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/timed out|timeout/i.test(msg)) {
+        const e = new Error("wait_timeout") as Error & { code?: string };
+        e.code = "wait_timeout";
+        throw e;
+      }
+      throw err;
+    }
+    return { jobId, queueName, result };
+  } finally {
+    await queueEvents.close();
+  }
 }
 
 /**
@@ -183,11 +274,11 @@ export async function retryFailedJobAsNew(
       ? base
       : (rec as { payload: unknown }).payload
     : base;
-  const forSplit = mergeObjectPayloadWithRetry(chosenPayload, rec.retry);
+  const forSplit = mergePayloadWithRetryForEnqueue(chosenPayload, rec.retry);
   const { payload, retryOverride } = splitJobEnqueueBody(reg, forSplit);
   reg.inputSchema.parse(payload);
   const eff = resolveBullmqRetryForEnqueue(reg, retryOverride);
-  return addQueueJob(redis, config, {
+  const r = await addQueueJob(redis, config, {
     job: { name: reg.name, queue: reg.queue },
     payload,
     eff,
@@ -198,6 +289,7 @@ export async function retryFailedJobAsNew(
       jobId: params.sourceJobId,
     },
   });
+  return { jobId: r.jobId, queueName: r.queueName };
 }
 
 const DEFAULT_LIST_JOB_TYPES: JobType[] = [

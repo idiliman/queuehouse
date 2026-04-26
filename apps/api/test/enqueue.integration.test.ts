@@ -17,6 +17,7 @@ import {
   bullmqPrefix,
   exampleDlqJob,
   exampleFailJob,
+  exampleProgressJob,
   exampleSuccessJob,
   loadConfig,
   runJobFromQueueData,
@@ -684,5 +685,124 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     const viewCookie = cookiePairFromSetCookie(viewLogin.headers.get("set-cookie")!);
     const denied = await app.request("/api/v1/audit-logs", { headers: { Cookie: viewCookie } });
     expect(denied.status).toBe(403);
+  });
+
+  it("manual enqueue: admin enqueues example.progress (manual.ui only) and it completes", async () => {
+    await prisma.user.create({
+      data: {
+        email: "manual-ui@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "manual-ui@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const reqId = "req_manual_progress_1";
+    const res = await app.request("/api/v1/manual-enqueue", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+        "X-Request-Id": reqId,
+      },
+      body: JSON.stringify({
+        jobName: exampleProgressJob.name,
+        payload: { steps: 1 },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { jobId: string; queueName: string };
+    expect(body.queueName).toBe(exampleProgressJob.queue);
+    const detail = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(body.queueName)}/${encodeURIComponent(body.jobId)}`,
+      { headers: { Cookie: cookie } },
+    );
+    expect(detail.status).toBe(200);
+    const row = await prisma.auditLog.findFirst({
+      where: { requestId: reqId, action: "job.enqueue" },
+    });
+    expect(row?.result).toBe("SUCCESS");
+    const s = row?.summary as Record<string, unknown>;
+    expect(s.path).toBe("manual");
+    expect(s.jobName).toBe(exampleProgressJob.name);
+  });
+
+  it("manual enqueue: viewer receives 403", async () => {
+    await prisma.user.create({
+      data: {
+        email: "manual-view@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "manual-view@example.com", password: "pw" }),
+    });
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const res = await app.request("/api/v1/manual-enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ jobName: "example.success", payload: { message: "n" } }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("manual enqueue: rejects example.deprecated (no manual.ui)", async () => {
+    await prisma.user.create({
+      data: {
+        email: "manual-dep@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "manual-dep@example.com", password: "pw" }),
+    });
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const res = await app.request("/api/v1/manual-enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ jobName: "example.deprecated", payload: {} }),
+    });
+    expect(res.status).toBe(403);
+    const b = (await res.json()) as { error: string };
+    expect(b.error).toBe("manual_enqueue_not_allowed");
+  });
+
+  it("manual enqueue: wait returns job result for example.success", async () => {
+    await prisma.user.create({
+      data: {
+        email: "manual-wait@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "manual-wait@example.com", password: "pw" }),
+    });
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const res = await app.request("/api/v1/manual-enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        jobName: exampleSuccessJob.name,
+        payload: { message: "waited" },
+        waitTimeoutMs: 30_000,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const b = (await res.json()) as { result?: { echoed: string } };
+    expect(b.result).toEqual({ echoed: "waited" });
   });
 });
