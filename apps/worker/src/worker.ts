@@ -16,6 +16,11 @@ import {
 import { UnrecoverableError, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { bullmqWorkerGracefulShutdown } from "./bullmq-graceful-shutdown";
+import {
+  recordJobProcessing,
+  renderWorkerPrometheusText,
+  workerPrometheusContentType,
+} from "./worker-prometheus";
 
 const WORKER_CONCURRENCY = 5;
 
@@ -33,9 +38,25 @@ const workers = uniqueQueues.map(
     new Worker(
       queueName,
       async (job) => {
+        const data = job.data as { jobName?: string };
+        const jobName = data.jobName ?? "unknown";
+        const t0 = performance.now();
         try {
-          return runJobFromQueueData(job.data);
+          const out = await runJobFromQueueData(job.data);
+          recordJobProcessing({
+            queue: queueName,
+            jobName,
+            durationSeconds: (performance.now() - t0) / 1000,
+            result: "success",
+          });
+          return out;
         } catch (e) {
+          recordJobProcessing({
+            queue: queueName,
+            jobName,
+            durationSeconds: (performance.now() - t0) / 1000,
+            result: "error",
+          });
           if (isJobUnrecoverableError(e)) {
             throw new UnrecoverableError(e.message);
           }
@@ -52,7 +73,36 @@ structuredLog(config, "queuehouse-worker", "info", "worker started", {
   bullPrefix: prefix,
 });
 
+function parseWorkerMetricsPort(): number | undefined {
+  const raw = process.env.WORKER_METRICS_PORT?.trim();
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    structuredLog(config, "queuehouse-worker", "warn", "invalid WORKER_METRICS_PORT; metrics disabled", {
+      WORKER_METRICS_PORT: raw,
+    });
+    return undefined;
+  }
+  return n;
+}
+
 if (import.meta.main) {
+  const metricsPort = parseWorkerMetricsPort();
+  if (metricsPort !== undefined) {
+    Bun.serve({
+      port: metricsPort,
+      fetch: async () => {
+        const body = await renderWorkerPrometheusText(config);
+        return new Response(body, {
+          headers: { "Content-Type": workerPrometheusContentType() },
+        });
+      },
+    });
+    structuredLog(config, "queuehouse-worker", "info", "worker metrics listening", {
+      port: metricsPort,
+    });
+  }
+
   const instanceId = randomUUID();
   const heartbeatKey = workerHeartbeatRedisKey(config.namespace, instanceId);
   const startedAt = new Date().toISOString();

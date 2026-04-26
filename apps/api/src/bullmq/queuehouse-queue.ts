@@ -11,6 +11,7 @@ import {
   resolveBullmqRetryForEnqueue,
   splitJobEnqueueBody,
   WORKER_HEARTBEAT_REFRESH_MS,
+  structuredLog,
   workerHeartbeatKeyPattern,
   type QueuehouseConfig,
   type WorkerHeartbeatPayload,
@@ -103,6 +104,22 @@ async function addQueueJob(
   }
   if (bullJob.id === undefined || bullJob.id === null) {
     throw new Error("bullmq_missing_job_id");
+  }
+  if (config.nodeEnv === "production") {
+    structuredLog(config, "queuehouse-api", "info", "job_enqueued", {
+      queue: job.queue,
+      job: job.name,
+      jobId: String(bullJob.id),
+      requestId,
+      ...(retriedAsNewFrom
+        ? {
+            retriedAsNewFrom: {
+              queue: retriedAsNewFrom.queueName,
+              jobId: retriedAsNewFrom.jobId,
+            },
+          }
+        : {}),
+    });
   }
   return { jobId: String(bullJob.id), queueName: job.queue, bullJob };
 }

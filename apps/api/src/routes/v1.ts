@@ -9,6 +9,7 @@ import {
   mergePayloadWithRetryForEnqueue,
   resolveManualEnqueueDelayMs,
   splitJobEnqueueBody,
+  structuredLog,
 } from "@queuehouse/core";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@queuehouse/db";
@@ -772,6 +773,15 @@ v1.post("/jobs/:queueName/:jobId/retry", async (c) => {
     summary: { queueName, jobId, jobName: jn ?? null },
     result: AUDIT_RESULT.SUCCESS,
   });
+  if (config.nodeEnv === "production") {
+    structuredLog(config, "queuehouse-api", "info", "dlq_retry_in_place", {
+      requestId: c.get("requestId"),
+      queue: queueName,
+      jobId,
+      job: jn,
+      actor: `${user.role}:${user.id}`,
+    });
+  }
   return c.json({ ok: true as const });
 });
 
@@ -950,6 +960,15 @@ v1.delete("/jobs/:queueName/:jobId", async (c) => {
     summary: { queueName, jobId, jobName: jn ?? null },
     result: AUDIT_RESULT.SUCCESS,
   });
+  if (config.nodeEnv === "production") {
+    structuredLog(config, "queuehouse-api", "info", "dlq_remove", {
+      requestId: c.get("requestId"),
+      queue: queueName,
+      jobId,
+      job: jn,
+      actor: `${user.role}:${user.id}`,
+    });
+  }
   return c.body(null, 204);
 });
 
