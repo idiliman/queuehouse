@@ -13,6 +13,7 @@ export {
   type QueueJobData,
 } from "./queue-data";
 export { registerExampleJobs } from "./install-examples";
+export { redactObjectAtPaths } from "./redaction";
 export {
   clearJobRegistryForTests,
   getRegisteredJob,

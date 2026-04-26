@@ -10,7 +10,7 @@ import {
   resolveSessionUser,
 } from "../auth/session";
 import type { ApiVariables } from "../api-types";
-import { getJobDetail } from "../bullmq/queuehouse-queue";
+import { getJobDetail, listJobs } from "../bullmq/queuehouse-queue";
 import { getQueuehouseRedis } from "../bullmq/redis";
 import { createApiDocsApp } from "../openapi/api-docs";
 
@@ -98,6 +98,52 @@ v1.get("/protected/admin", async (c) => {
     return c.json({ error: "forbidden" }, 403);
   }
   return c.json({ ok: true, role: user.role });
+});
+
+/**
+ * List jobs (recent slice per queue/state). Requires auth. Does not return raw payload.
+ * Query: queue, state (comma list), jobName, jobId, schedulerId, from, to, minAttempts, maxAttempts, limit
+ */
+v1.get("/jobs", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  const sp = c.req.query();
+  const limitParsed = sp.limit != null && sp.limit !== "" ? parseInt(sp.limit, 10) : 50;
+  const limit = Math.min(200, Math.max(1, Number.isNaN(limitParsed) ? 50 : limitParsed));
+  const n = (v: string | undefined) =>
+    v != null && v !== "" ? Number(v) : undefined;
+  const from = n(sp.from);
+  const to = n(sp.to);
+  if (from != null && Number.isNaN(from)) {
+    return c.json({ error: "invalid_from" }, 400);
+  }
+  if (to != null && Number.isNaN(to)) {
+    return c.json({ error: "invalid_to" }, 400);
+  }
+  const minAttempts = n(sp.minAttempts);
+  const maxAttempts = n(sp.maxAttempts);
+  if (minAttempts != null && Number.isNaN(minAttempts)) {
+    return c.json({ error: "invalid_minAttempts" }, 400);
+  }
+  if (maxAttempts != null && Number.isNaN(maxAttempts)) {
+    return c.json({ error: "invalid_maxAttempts" }, 400);
+  }
+  const redis = getQueuehouseRedis(config);
+  const jobs = await listJobs(redis, config, {
+    queue: sp.queue,
+    state: sp.state,
+    jobName: sp.jobName,
+    jobId: sp.jobId,
+    schedulerId: sp.schedulerId,
+    from,
+    to,
+    minAttempts,
+    maxAttempts,
+    limit,
+  });
+  return c.json({ jobs });
 });
 
 /**

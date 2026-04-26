@@ -1,9 +1,11 @@
-import { Queue, type Job } from "bullmq";
+import { Queue, type Job, type JobType } from "bullmq";
 import type IORedis from "ioredis";
 import {
   bullmqPrefix,
   getRegisteredJob,
   JOB_CAPABILITY,
+  listRegisteredJobs,
+  redactObjectAtPaths,
   type QueuehouseConfig,
 } from "@queuehouse/core";
 
@@ -80,12 +82,156 @@ export async function enqueueAuthenticatedJob(
   return { jobId: String(bullJob.id), queueName: job.queue };
 }
 
-export async function getJobDetail(
+const DEFAULT_LIST_JOB_TYPES: JobType[] = [
+  "active",
+  "completed",
+  "delayed",
+  "failed",
+  "prioritized",
+  "waiting",
+  "waiting-children",
+];
+
+function parseListStates(param: string | undefined): JobType[] | undefined {
+  if (!param?.trim()) return undefined;
+  const parts = param
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const map: Record<string, JobType | undefined> = {
+    active: "active",
+    completed: "completed",
+    delayed: "delayed",
+    failed: "failed",
+    paused: "paused",
+    prioritized: "prioritized",
+    waiting: "waiting",
+    "waiting-children": "waiting-children",
+  };
+  const out: JobType[] = [];
+  for (const p of parts) {
+    const t = map[p];
+    if (t) out.push(t);
+  }
+  return out.length > 0 ? [...new Set(out)] : undefined;
+}
+
+function redactForRegisteredJob(
+  jobName: string | undefined,
+  payload: unknown,
+  result: unknown,
+): { payload: unknown; result: unknown } {
+  const reg = jobName ? getRegisteredJob(jobName) : undefined;
+  const meta = reg?.redaction;
+  return {
+    payload: redactObjectAtPaths(payload, meta?.payloadPaths),
+    result: redactObjectAtPaths(result, meta?.resultPaths),
+  };
+}
+
+export type ListJobsQuery = {
+  /** Limit one queue; when omitted, all registered queues are scanned. */
+  queue?: string;
+  /** Comma-separated BullMQ list states. */
+  state?: string;
+  jobName?: string;
+  jobId?: string;
+  schedulerId?: string;
+  from?: number;
+  to?: number;
+  minAttempts?: number;
+  maxAttempts?: number;
+  limit: number;
+};
+
+export type JobListItem = {
+  jobId: string;
+  queueName: string;
+  state: string;
+  jobName?: string;
+  created?: number;
+  processedOn?: number;
+  finishedOn?: number;
+  attemptsMade: number;
+  maxAttempts?: number;
+  priority: number;
+  failedReason?: string;
+  schedulerId?: string;
+};
+
+/**
+ * List recent jobs from BullMQ across registered operator queues, with server-side filters.
+ * Does not return raw payload (detail page only).
+ */
+export async function listJobs(
   redis: IORedis,
   config: QueuehouseConfig,
-  queueName: string,
-  jobId: string,
-): Promise<{
+  q: ListJobsQuery,
+): Promise<JobListItem[]> {
+  const regQueues = new Set<string>();
+  for (const j of listRegisteredJobs()) {
+    regQueues.add(j.queue);
+  }
+  const targetQueues: string[] = [];
+  if (q.queue?.trim()) {
+    if (!regQueues.has(q.queue.trim())) {
+      return [];
+    }
+    targetQueues.push(q.queue.trim());
+  } else {
+    targetQueues.push(...[...regQueues].sort());
+  }
+
+  const types = parseListStates(q.state) ?? DEFAULT_LIST_JOB_TYPES;
+  const end = Math.min(499, Math.max(q.limit * 4, q.limit) - 1);
+  const collected: Job[] = [];
+  for (const queueName of targetQueues) {
+    const queue = getOrCreateQueue(redis, config, queueName);
+    const batch = await queue.getJobs(types, 0, end, false);
+    for (const j of batch) {
+      if (j?.id) collected.push(j);
+    }
+  }
+
+  const seen = new Set<string>();
+  const rows: JobListItem[] = [];
+  for (const job of collected) {
+    const queueName = job.queueName;
+    const id = String(job.id);
+    const dedupe = `${queueName}\0${id}`;
+    if (seen.has(dedupe)) continue;
+    seen.add(dedupe);
+    const data = job.data as { jobName?: string };
+    const jn = data.jobName;
+    if (q.jobName && jn !== q.jobName) continue;
+    if (q.jobId && id !== q.jobId) continue;
+    if (q.schedulerId && (job.repeatJobKey ?? "") !== q.schedulerId) continue;
+    if (q.from != null && job.timestamp < q.from) continue;
+    if (q.to != null && job.timestamp > q.to) continue;
+    if (q.minAttempts != null && job.attemptsMade < q.minAttempts) continue;
+    if (q.maxAttempts != null && job.attemptsMade > q.maxAttempts) continue;
+    const state = await job.getState();
+    rows.push({
+      jobId: id,
+      queueName,
+      state,
+      jobName: jn,
+      created: job.timestamp,
+      processedOn: job.processedOn ?? undefined,
+      finishedOn: job.finishedOn ?? undefined,
+      attemptsMade: job.attemptsMade,
+      maxAttempts: job.opts?.attempts,
+      priority: job.priority,
+      failedReason: job.failedReason,
+      schedulerId: job.repeatJobKey,
+    });
+  }
+
+  rows.sort((a, b) => (b.created ?? 0) - (a.created ?? 0));
+  return rows.slice(0, q.limit);
+}
+
+export type JobDetailResult = {
   jobId: string;
   queueName: string;
   state: string;
@@ -93,9 +239,29 @@ export async function getJobDetail(
   payload: unknown;
   result: unknown;
   failedReason?: string;
+  stacktrace?: string[];
+  progress: unknown;
+  logs: string[];
+  metadata: {
+    requestId?: string;
+    enqueuedBy?: { userId: string; role: string };
+    priority: number;
+    delay: number;
+    attemptsMade: number;
+    maxAttempts?: number;
+    repeatJobKey?: string;
+    deduplicationId?: string;
+  };
   timestamps: { created?: number; processed?: number; finished?: number };
   requestId?: string;
-} | null> {
+};
+
+export async function getJobDetail(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  queueName: string,
+  jobId: string,
+): Promise<JobDetailResult | null> {
   const queue = getOrCreateQueue(redis, config, queueName);
   const job: Job | undefined = await queue.getJob(jobId);
   if (!job) return null;
@@ -104,15 +270,41 @@ export async function getJobDetail(
     jobName?: string;
     payload?: unknown;
     requestId?: string;
+    enqueuedBy?: { userId: string; role: string };
   };
+  const { payload: redactedPayload, result: redactedResult } = redactForRegisteredJob(
+    data.jobName,
+    data.payload,
+    job.returnvalue,
+  );
+  let logs: string[] = [];
+  try {
+    const logRes = await queue.getJobLogs(jobId, 0, 199, true);
+    logs = logRes.logs;
+  } catch {
+    logs = [];
+  }
   return {
     jobId: String(job.id),
     queueName,
     state,
     jobName: data.jobName,
-    payload: data.payload,
-    result: job.returnvalue,
+    payload: redactedPayload,
+    result: redactedResult,
     failedReason: job.failedReason,
+    stacktrace: job.stacktrace ?? undefined,
+    progress: job.progress,
+    logs,
+    metadata: {
+      requestId: data.requestId,
+      enqueuedBy: data.enqueuedBy,
+      priority: job.priority,
+      delay: job.delay,
+      attemptsMade: job.attemptsMade,
+      maxAttempts: job.opts?.attempts,
+      repeatJobKey: job.repeatJobKey,
+      deduplicationId: job.deduplicationId,
+    },
     timestamps: {
       created: job.timestamp,
       processed: job.processedOn ?? undefined,

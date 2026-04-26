@@ -5,6 +5,9 @@ import {
   useEffect,
   useState,
 } from "react";
+import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { JobDetailPage } from "./operator/JobDetailPage";
+import { JobsTablePage } from "./operator/JobsTablePage";
 
 type Role = "VIEWER" | "ADMIN";
 
@@ -87,60 +90,111 @@ export function App() {
 
   return (
     <main style={shell}>
-      <h1 style={{ fontSize: "1.75rem", fontWeight: 600 }}>Queuehouse</h1>
+      <header style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "1rem" }}>
+        <h1 style={{ fontSize: "1.75rem", fontWeight: 600, margin: 0 }}>Queuehouse</h1>
+        {user ? (
+          <nav style={{ display: "flex", gap: "0.75rem", fontSize: "0.95rem" }}>
+            <Link to="/" style={navStyle}>
+              Home
+            </Link>
+            <Link to="/jobs" style={navStyle}>
+              Jobs
+            </Link>
+          </nav>
+        ) : null}
+      </header>
 
-      {user ? (
-        <section style={{ marginTop: "1.5rem" }}>
-          <p style={{ color: "#444", lineHeight: 1.5 }}>
-            Signed in as <strong>{user.email}</strong> ({user.role.toLowerCase()}).
-          </p>
-          <button
-            type="button"
-            onClick={() => void onLogout()}
-            disabled={busy}
-            style={buttonStyle}
-          >
-            Log out
-          </button>
-        </section>
-      ) : (
-        <section style={{ marginTop: "1.5rem", maxWidth: "22rem" }}>
-          <form onSubmit={(e) => void onLogin(e)} style={{ display: "grid", gap: "0.75rem" }}>
-            <label style={labelStyle}>
-              Email
-              <input
-                type="email"
-                name="email"
-                autoComplete="username"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                style={inputStyle}
-              />
-            </label>
-            <label style={labelStyle}>
-              Password
-              <input
-                type="password"
-                name="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                style={inputStyle}
-              />
-            </label>
-            {error ? (
-              <p role="alert" style={{ color: "#b42318", margin: 0, fontSize: "0.9rem" }}>
-                {error}
-              </p>
-            ) : null}
-            <button type="submit" disabled={busy} style={buttonStyle}>
-              {busy ? "Signing in…" : "Sign in"}
-            </button>
-          </form>
-        </section>
-      )}
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <section style={{ marginTop: "1.5rem" }}>
+              {user ? (
+                <div>
+                  <p style={{ color: "#444", lineHeight: 1.5 }}>
+                    Signed in as <strong>{user.email}</strong> ({user.role.toLowerCase()}).
+                  </p>
+                  <p style={{ lineHeight: 1.5 }}>
+                    <Link to="/jobs" style={navStyle}>
+                      Open jobs
+                    </Link>
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void onLogout()}
+                    disabled={busy}
+                    style={buttonStyle}
+                  >
+                    Log out
+                  </button>
+                </div>
+              ) : (
+                <div style={{ maxWidth: "22rem" }}>
+                  <form onSubmit={(e) => void onLogin(e)} style={{ display: "grid", gap: "0.75rem" }}>
+                    <label style={labelStyle}>
+                      Email
+                      <input
+                        type="email"
+                        name="email"
+                        autoComplete="username"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        required
+                        style={inputStyle}
+                      />
+                    </label>
+                    <label style={labelStyle}>
+                      Password
+                      <input
+                        type="password"
+                        name="password"
+                        autoComplete="current-password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        required
+                        style={inputStyle}
+                      />
+                    </label>
+                    {error ? (
+                      <p role="alert" style={{ color: "#b42318", margin: 0, fontSize: "0.9rem" }}>
+                        {error}
+                      </p>
+                    ) : null}
+                    <button type="submit" disabled={busy} style={buttonStyle}>
+                      {busy ? "Signing in…" : "Sign in"}
+                    </button>
+                  </form>
+                </div>
+              )}
+            </section>
+          }
+        />
+        <Route
+          path="/jobs"
+          element={
+            user ? (
+              <section style={{ marginTop: "1.5rem" }}>
+                <JobsTablePage />
+              </section>
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
+        <Route
+          path="/jobs/:queueName/:jobId"
+          element={
+            user ? (
+              <section style={{ marginTop: "1.5rem" }}>
+                <JobDetailPage />
+              </section>
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </main>
   );
 }
@@ -148,8 +202,13 @@ export function App() {
 const shell: CSSProperties = {
   fontFamily: "system-ui, sans-serif",
   padding: "2rem",
-  maxWidth: "48rem",
+  maxWidth: "56rem",
   margin: "0 auto",
+};
+
+const navStyle: CSSProperties = {
+  color: "#0b57d0",
+  textDecoration: "none",
 };
 
 const labelStyle: CSSProperties = {

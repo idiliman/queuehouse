@@ -24,6 +24,7 @@ export {
   queueJobDataSchema,
   registerExampleJobs,
   registerJob,
+  redactObjectAtPaths,
   runExampleJobSync,
   runJobFromQueueData,
   type DefineJobOptions,

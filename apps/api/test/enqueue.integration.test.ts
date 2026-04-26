@@ -177,6 +177,18 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     expect(detail?.result).toEqual({ echoed: "integration" });
     expect(detail?.jobName).toBe(exampleSuccessJob.name);
     expect(detail?.requestId).toBe(reqId);
+    const pl = detail?.payload as { message?: string };
+    expect(pl?.message).toBe("[REDACTED]");
+
+    const list = await app.request(
+      `/api/v1/jobs?queue=${encodeURIComponent(accepted.queueName)}&jobId=${encodeURIComponent(accepted.jobId)}&limit=20`,
+      { headers: { Cookie: cookieHeader } },
+    );
+    expect(list.status).toBe(200);
+    const listBody = (await list.json()) as { jobs: { jobId: string; queueName: string }[] };
+    expect(listBody.jobs.some((j) => j.jobId === accepted.jobId && j.queueName === accepted.queueName)).toBe(
+      true,
+    );
   });
 
   it("returns 401 for enqueue without session", async () => {
