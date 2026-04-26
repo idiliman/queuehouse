@@ -76,6 +76,8 @@ Loaded via `loadConfig` in `@queuehouse/core` (API uses stricter production rule
 | `CORS_ORIGIN` | Production browser access | Comma-separated allowed origins (dev defaults to local Vite). |
 | `WORKER_SHUTDOWN_GRACE_MS` | Optional | Worker SIGTERM grace (default 30s, max 1h). |
 | `WORKER_METRICS_PORT` | Optional | When set (1–65535), worker serves `GET /metrics` (Prometheus) on this port. Scrape alongside the API `/metrics` (different process). Restrict at the network layer in production. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Optional | When set on the API, registers OTLP trace export, W3C incoming trace propagation on HTTP, producer spans around enqueue, and stores `traceparent` / optional `tracestate` on Bull job payloads (`traceContext`). When set on the worker, registers export and consumer spans around job runs, parent-linked when `traceContext` is present. Omit both in environments where tracing is unused. |
+| `OTEL_SERVICE_NAME` or `QUEUEHOUSE_OTEL_SERVICE_NAME` | Optional | `service.name` resource attribute (defaults: `queuehouse-api`, `queuehouse-worker`). |
 | `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` | bootstrap only | Alternative to CLI flags for `bootstrap`. |
 
 ## Production guards

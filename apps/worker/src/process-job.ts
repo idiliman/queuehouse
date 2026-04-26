@@ -3,11 +3,13 @@ import {
   AUDIT_ACTION,
   getRegisteredJob,
   runJobFromQueueData,
+  runWithJobTraceContext,
   type QueuehouseConfig,
 } from "@queuehouse/core";
 import { appendAuditLogBestEffort } from "@queuehouse/db";
 import type { Job } from "bullmq";
 import type IORedis from "ioredis";
+import { isQueuehouseOtlpTracingEnabled } from "./otel/register-tracing";
 
 type QueueJobEnvelope = {
   jobName?: string;
@@ -18,39 +20,46 @@ type QueueJobEnvelope = {
 
 export function createBullJobProcessor(redis: IORedis, config: QueuehouseConfig) {
   return async (job: Job): Promise<unknown> => {
-    const data = job.data as QueueJobEnvelope;
-    if (data.jobName === "queuehouse.bulk_dlq") {
-      const reg = getRegisteredJob("queuehouse.bulk_dlq");
-      if (!reg) {
-        throw new Error("queuehouse.bulk_dlq not registered");
+    const run = async (): Promise<unknown> => {
+      const data = job.data as QueueJobEnvelope;
+      if (data.jobName === "queuehouse.bulk_dlq") {
+        const reg = getRegisteredJob("queuehouse.bulk_dlq");
+        if (!reg) {
+          throw new Error("queuehouse.bulk_dlq not registered");
+        }
+        const payload = reg.inputSchema.parse(data.payload);
+        const out = await runBulkDlqOperation(redis, config, payload, (current, total) =>
+          job.updateProgress({ current, total }),
+        );
+        const parsed = reg.outputSchema.parse(out);
+        const userId = data.enqueuedBy?.userId;
+        const requestId = data.requestId;
+        if (userId && requestId) {
+          await appendAuditLogBestEffort({
+            requestId,
+            userId,
+            action: AUDIT_ACTION.BULK_DLQ_COMPLETE,
+            summary: {
+              action: payload.action,
+              requested: parsed.requested,
+              executed: parsed.executed,
+              skipped: parsed.skipped,
+              failed: parsed.failed,
+              systemJobId: String(job.id),
+              systemQueueName: job.queueName ?? "queuehouse-system",
+              bulkRequestId: payload.bulkRequestId ?? null,
+            },
+            result: "SUCCESS",
+          });
+        }
+        return parsed;
       }
-      const payload = reg.inputSchema.parse(data.payload);
-      const out = await runBulkDlqOperation(redis, config, payload, (current, total) =>
-        job.updateProgress({ current, total }),
-      );
-      const parsed = reg.outputSchema.parse(out);
-      const userId = data.enqueuedBy?.userId;
-      const requestId = data.requestId;
-      if (userId && requestId) {
-        await appendAuditLogBestEffort({
-          requestId,
-          userId,
-          action: AUDIT_ACTION.BULK_DLQ_COMPLETE,
-          summary: {
-            action: payload.action,
-            requested: parsed.requested,
-            executed: parsed.executed,
-            skipped: parsed.skipped,
-            failed: parsed.failed,
-            systemJobId: String(job.id),
-            systemQueueName: job.queueName ?? "queuehouse-system",
-            bulkRequestId: payload.bulkRequestId ?? null,
-          },
-          result: "SUCCESS",
-        });
-      }
-      return parsed;
+      return runJobFromQueueData(job.data);
+    };
+
+    if (isQueuehouseOtlpTracingEnabled()) {
+      return runWithJobTraceContext(job.data, "queuehouse.job.run", run);
     }
-    return runJobFromQueueData(job.data);
+    return run();
   };
 }

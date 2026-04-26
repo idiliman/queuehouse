@@ -1,3 +1,4 @@
+import { SpanKind, trace } from "@opentelemetry/api";
 import { Queue, QueueEvents, type Job, type JobType } from "bullmq";
 import { getOrCreateQueue, removeFailedJob, retryFailedJobInPlace } from "@queuehouse/bull-ops";
 import type IORedis from "ioredis";
@@ -5,6 +6,7 @@ import {
   bullmqPrefix,
   getEffectiveRetryOptions,
   getRegisteredJob,
+  injectTraceContextIntoJobData,
   JOB_CAPABILITY,
   listRegisteredJobs,
   mergePayloadWithRetryForEnqueue,
@@ -17,6 +19,7 @@ import {
   type QueuehouseConfig,
   type WorkerHeartbeatPayload,
 } from "@queuehouse/core";
+import { isQueuehouseOtlpTracingEnabled } from "../otel/register-tracing";
 
 export { getOrCreateQueue, removeFailedJob, retryFailedJobInPlace } from "@queuehouse/bull-ops";
 
@@ -78,38 +81,68 @@ async function addQueueJob(
   if (schedule?.priority != null) {
     addOpts.priority = schedule.priority;
   }
-  let bullJob: Job;
-  try {
-    bullJob = await queue.add(job.name, data, addOpts);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (schedule?.jobId && /exist|Exist|Duplicate|duplicate|collision/i.test(msg)) {
-      const e = new Error("dedupe_job_id_conflict") as Error & { code?: string };
-      e.code = "dedupe_job_id_conflict";
-      throw e;
+
+  const finishEnqueue = async (): Promise<{ jobId: string; queueName: string; bullJob: Job }> => {
+    if (isQueuehouseOtlpTracingEnabled()) {
+      injectTraceContextIntoJobData(data as Record<string, unknown>);
     }
-    throw err;
-  }
-  if (bullJob.id === undefined || bullJob.id === null) {
-    throw new Error("bullmq_missing_job_id");
-  }
-  if (config.nodeEnv === "production") {
-    structuredLog(config, "queuehouse-api", "info", "job_enqueued", {
-      queue: job.queue,
-      job: job.name,
-      jobId: String(bullJob.id),
-      requestId,
-      ...(retriedAsNewFrom
-        ? {
-            retriedAsNewFrom: {
-              queue: retriedAsNewFrom.queueName,
-              jobId: retriedAsNewFrom.jobId,
-            },
+    let bullJob: Job;
+    try {
+      bullJob = await queue.add(job.name, data, addOpts);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (schedule?.jobId && /exist|Exist|Duplicate|duplicate|collision/i.test(msg)) {
+        const e = new Error("dedupe_job_id_conflict") as Error & { code?: string };
+        e.code = "dedupe_job_id_conflict";
+        throw e;
+      }
+      throw err;
+    }
+    if (bullJob.id === undefined || bullJob.id === null) {
+      throw new Error("bullmq_missing_job_id");
+    }
+    if (config.nodeEnv === "production") {
+      structuredLog(config, "queuehouse-api", "info", "job_enqueued", {
+        queue: job.queue,
+        job: job.name,
+        jobId: String(bullJob.id),
+        requestId,
+        ...(retriedAsNewFrom
+          ? {
+              retriedAsNewFrom: {
+                queue: retriedAsNewFrom.queueName,
+                jobId: retriedAsNewFrom.jobId,
+              },
+            }
+          : {}),
+      });
+    }
+    return { jobId: String(bullJob.id), queueName: job.queue, bullJob };
+  };
+
+  if (isQueuehouseOtlpTracingEnabled()) {
+    const tracer = trace.getTracer("queuehouse");
+    return tracer.startActiveSpan(
+      "queuehouse.job.enqueue",
+      { kind: SpanKind.PRODUCER },
+      async (span) => {
+        span.setAttribute("queuehouse.queue", job.queue);
+        span.setAttribute("queuehouse.job_name", job.name);
+        try {
+          const out = await finishEnqueue();
+          span.setAttribute("queuehouse.bull_job_id", out.jobId);
+          return out;
+        } catch (e) {
+          if (e instanceof Error) {
+            span.recordException(e);
           }
-        : {}),
-    });
+          throw e;
+        }
+      },
+    );
   }
-  return { jobId: String(bullJob.id), queueName: job.queue, bullJob };
+
+  return finishEnqueue();
 }
 
 export async function enqueueAuthenticatedJob(

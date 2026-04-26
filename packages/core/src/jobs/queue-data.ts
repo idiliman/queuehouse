@@ -24,6 +24,13 @@ export const queueJobDataSchema = z.object({
       jobId: z.string().min(1),
     })
     .optional(),
+  /** W3C Trace Context from the enqueue path when OTLP tracing is enabled on the API. */
+  traceContext: z
+    .object({
+      traceparent: z.string().min(1),
+      tracestate: z.string().optional(),
+    })
+    .optional(),
 });
 
 export type QueueJobData = z.infer<typeof queueJobDataSchema>;

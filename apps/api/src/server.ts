@@ -13,7 +13,10 @@ import {
   recordHttpServerRequest,
   renderPrometheusText,
 } from "./metrics/prometheus";
+import { honoIncomingTraceMiddleware, registerQueuehouseApiTracing } from "./otel/register-tracing";
 import { v1 } from "./routes/v1";
+
+const otlpTracingOn = registerQueuehouseApiTracing();
 
 const app = new Hono<{ Variables: ApiVariables }>();
 
@@ -23,6 +26,10 @@ function describeActor(c: Context<{ Variables: ApiVariables }>): string | undefi
   const apiKey = c.get("apiKey");
   if (apiKey) return `api_key:${apiKey.id}`;
   return undefined;
+}
+
+if (otlpTracingOn) {
+  app.use(honoIncomingTraceMiddleware);
 }
 
 app.use(async (c, next) => {

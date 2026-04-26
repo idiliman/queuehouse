@@ -15,6 +15,7 @@ import {
 import { UnrecoverableError, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { bullmqWorkerGracefulShutdown } from "./bullmq-graceful-shutdown";
+import { registerQueuehouseWorkerTracing } from "./otel/register-tracing";
 import { createBullJobProcessor } from "./process-job";
 import {
   recordJobProcessing,
@@ -23,6 +24,8 @@ import {
 } from "./worker-prometheus";
 
 const WORKER_CONCURRENCY = 5;
+
+registerQueuehouseWorkerTracing();
 
 const config = loadConfig(process.env, {
   requireSessionSecret: false,

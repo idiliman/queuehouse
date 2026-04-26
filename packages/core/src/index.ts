@@ -11,6 +11,8 @@ export {
   type QueuehouseConfig,
 } from "./config";
 
+export { injectTraceContextIntoJobData, runWithJobTraceContext } from "./otel/job-trace-context";
+
 export {
   structuredLog,
   type QueuehouseServiceName,
