@@ -9,6 +9,7 @@ export {
   type LoadConfigOptions,
   type NodeEnv,
   type QueuehouseConfig,
+  type RetentionPolicy,
 } from "./config";
 
 export { injectTraceContextIntoJobData, runWithJobTraceContext } from "./otel/job-trace-context";
@@ -46,6 +47,7 @@ export {
   listRegisteredJobs,
   queueJobDataSchema,
   queuehouseBulkDlqJob,
+  queuehouseRetentionCleanupJob,
   registerExampleJobs,
   registerJob,
   redactObjectAtPaths,

@@ -4,6 +4,16 @@ export const EXAMPLE_DATABASE_URL =
 
 export type NodeEnv = "development" | "production" | "test";
 
+/** Time-based BullMQ retention: jobs older than these windows are eligible for `queue.clean`. */
+export type RetentionPolicy = {
+  /** Product queues: completed jobs at least this old are removed. */
+  completedJobMs: number;
+  /** Product queues: failed jobs at least this old are removed. */
+  failedJobMs: number;
+  /** `queuehouse-system` completed + failed jobs use this window. */
+  systemQueueMs: number;
+};
+
 export type LoadConfigOptions = {
   /** When false, `DATABASE_URL` is optional (e.g. worker before DB use). Default true. */
   requireDatabaseUrl?: boolean;
@@ -30,6 +40,8 @@ export type QueuehouseConfig = {
    * Zero means do not wait beyond pause/cancel. Parsed from `WORKER_SHUTDOWN_GRACE_MS`.
    */
   workerShutdownGraceMs: number;
+  /** Parsed from `RETENTION_*_DAYS` env; defaults match queuehouse spec (completed brief, failed longer, system mid). */
+  retention: RetentionPolicy;
 };
 
 const WEAK_SESSION_SECRETS = new Set(
@@ -64,6 +76,27 @@ function required(
 function optional(env: Record<string, string | undefined>, key: string): string | undefined {
   const v = env[key]?.trim();
   return v || undefined;
+}
+
+const MS_PER_DAY = 86_400_000;
+
+function parseDaysEnv(
+  env: Record<string, string | undefined>,
+  key: string,
+  defaultDays: number,
+): number {
+  const raw = optional(env, key);
+  if (raw === undefined) return defaultDays;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(
+      `Invalid ${key}: ${raw} — expected non-negative integer days (0 disables time-based removal for that category).`,
+    );
+  }
+  if (n > 3650) {
+    throw new Error(`Invalid ${key} — at most 3650 days`);
+  }
+  return n;
 }
 
 /**
@@ -108,6 +141,23 @@ export function loadConfig(
     workerShutdownGraceMs = n;
   }
 
+  const completedDays = parseDaysEnv(
+    env,
+    "RETENTION_COMPLETED_DAYS",
+    7,
+  );
+  const failedDays = parseDaysEnv(env, "RETENTION_FAILED_DAYS", 30);
+  const systemQueueDays = parseDaysEnv(
+    env,
+    "RETENTION_SYSTEM_QUEUE_DAYS",
+    14,
+  );
+  const retention: RetentionPolicy = {
+    completedJobMs: completedDays * MS_PER_DAY,
+    failedJobMs: failedDays * MS_PER_DAY,
+    systemQueueMs: systemQueueDays * MS_PER_DAY,
+  };
+
   if (nodeEnv === "production") {
     if (databaseUrl !== undefined && databaseUrl === EXAMPLE_DATABASE_URL) {
       throw new Error(
@@ -139,5 +189,6 @@ export function loadConfig(
     redisUrl,
     sessionSecret,
     workerShutdownGraceMs,
+    retention,
   };
 }

@@ -82,10 +82,34 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
     hasMore: boolean;
     cap: number;
   } | null>(null);
+  const [retention, setRetention] = useState<{
+    completedJobDays: number;
+    failedJobDays: number;
+    systemQueueDays: number;
+  } | null>(null);
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  const [retentionMessage, setRetentionMessage] = useState<ReactNode | null>(null);
 
   useEffect(() => {
     saveJobsTablePrefs(prefs);
   }, [prefs]);
+
+  useEffect(() => {
+    void (async () => {
+      const res = await fetch("/api/v1/retention-policy", { credentials: "include" });
+      if (!res.ok) return;
+      const b = (await res.json()) as {
+        completedJobDays: number;
+        failedJobDays: number;
+        systemQueueDays: number;
+      };
+      setRetention({
+        completedJobDays: b.completedJobDays,
+        failedJobDays: b.failedJobDays,
+        systemQueueDays: b.systemQueueDays,
+      });
+    })();
+  }, []);
 
   const queryString = useMemo(() => {
     const p = new URLSearchParams();
@@ -289,6 +313,55 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
     }
   };
 
+  const runRetentionCleanup = async () => {
+    if (!window.confirm("Run time-based job retention cleanup now? This enqueues a system job.")) return;
+    setRetentionMessage(null);
+    setRetentionBusy(true);
+    try {
+      const res = await fetch("/api/v1/admin/retention-cleanup", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        jobId?: string;
+        queueName?: string;
+      };
+      if (res.status === 401) {
+        setBulkError("Session expired. Sign in again.");
+        return;
+      }
+      if (res.status === 403) {
+        setBulkError("Only admins can run retention cleanup.");
+        return;
+      }
+      if (!res.ok) {
+        setBulkError(body.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      const jq = body.jobId != null && body.jobId !== "" && body.queueName;
+      setRetentionMessage(
+        <>
+          Retention cleanup enqueued.{" "}
+          {jq ? (
+            <Link
+              to={`/jobs/${encodeURIComponent(String(body.queueName))}/${encodeURIComponent(String(body.jobId))}`}
+              style={{ color: "#0b4d0b", fontWeight: 600, textDecoration: "underline" }}
+            >
+              Open system job
+            </Link>
+          ) : null}
+        </>,
+      );
+    } catch {
+      setBulkError("Network error.");
+    } finally {
+      setRetentionBusy(false);
+    }
+  };
+
   const cellPad = prefs.density === "compact" ? "0.3rem 0.45rem" : "0.45rem 0.55rem";
   const fontSize = prefs.density === "compact" ? "0.8rem" : "0.88rem";
 
@@ -297,6 +370,13 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
       <p style={{ marginTop: 0, color: "#333", lineHeight: 1.4 }}>
         Filter jobs stored in BullMQ. Preferences (filters, sort, density) persist in this browser.
       </p>
+      {retention ? (
+        <p style={{ marginTop: 0, marginBottom: "0.75rem", fontSize: "0.85rem", color: "#444" }}>
+          Retention (from env, not editable here): completed after {retention.completedJobDays} d, failed
+          after {retention.failedJobDays} d, system queue after {retention.systemQueueDays} d. Automated
+          runs: add a schedule for <code>queuehouse.retention_cleanup</code> with empty payload.
+        </p>
+      ) : null}
       <form
         onSubmit={onSubmit}
         style={{
@@ -495,6 +575,33 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
           </div>
         </div>
       ) : null}
+      {isAdmin ? (
+        <div
+          style={{
+            marginBottom: "0.75rem",
+            padding: "0.5rem 0.65rem",
+            background: "#f5fbff",
+            border: "1px solid #b8d4e6",
+            borderRadius: 4,
+            fontSize: "0.85rem",
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.5rem",
+            alignItems: "center",
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>Retention cleanup</span>
+          <span style={{ color: "#444" }}>Time-based <code>queue.clean</code> for old completed/failed jobs (see policy above).</span>
+          <button
+            type="button"
+            disabled={retentionBusy}
+            style={{ ...inputStyle, background: "#0d3a5c", color: "#fff", borderColor: "#0d3a5c" }}
+            onClick={() => void runRetentionCleanup()}
+          >
+            {retentionBusy ? "…" : "Run now (system job)"}
+          </button>
+        </div>
+      ) : null}
       {isAdmin && failedOnPage.length > 0 ? (
         <div
           style={{
@@ -568,6 +675,7 @@ export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
           {bulkMessage}
         </p>
       ) : null}
+      {retentionMessage ? <p style={{ color: "#1e5a1e", marginTop: 0 }}>{retentionMessage}</p> : null}
       {error ? (
         <p role="alert" style={{ color: "#b42318" }}>
           {error}

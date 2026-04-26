@@ -22,10 +22,12 @@ import {
   exampleSuccessJob,
   loadConfig,
   queuehouseBulkDlqJob,
+  queuehouseRetentionCleanupJob,
 } from "@queuehouse/core";
 import { createBullJobProcessor } from "../../worker/src/process-job";
 import { prisma } from "@queuehouse/db";
 import type { ApiVariables } from "../src/api-types";
+import { AUDIT_ACTION as API_AUDIT_ACTION } from "../src/audit/audit-log";
 
 const repoRoot = path.join(fileURLToPath(new URL("../../..", import.meta.url)));
 const dbPackageDir = path.join(repoRoot, "packages", "db");
@@ -607,6 +609,47 @@ integrationDescribe("Enqueue through worker (integration)", () => {
       skipped: 0,
       failed: 0,
     });
+  });
+
+  it("retention: admin can enqueue queuehouse.retention_cleanup and worker completes with audit", async () => {
+    await prisma.user.create({
+      data: {
+        email: "admin-retention@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin-retention@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const adminCookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+
+    const r = await app.request("/api/v1/admin/retention-cleanup", {
+      method: "POST",
+      headers: { Cookie: adminCookie, "X-Request-Id": "req_retention" },
+    });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as { jobId: string; queueName: string; retention: boolean };
+    expect(j.retention).toBe(true);
+    expect(j.queueName).toBe(queuehouseRetentionCleanupJob.queue);
+
+    const enqAudit = await prisma.auditLog.findFirst({
+      where: { requestId: "req_retention", action: API_AUDIT_ACTION.RETENTION_CLEANUP },
+    });
+    expect(enqAudit).not.toBeNull();
+
+    await waitForJobState(adminCookie, j.queueName, j.jobId, "completed");
+
+    const doneAudit = await prisma.auditLog.findFirst({
+      where: { requestId: "req_retention", action: AUDIT_ACTION.RETENTION_CLEANUP_COMPLETE },
+    });
+    expect(doneAudit).not.toBeNull();
+    const sum = doneAudit?.summary as Record<string, unknown>;
+    expect(typeof sum?.removedCompleted).toBe("number");
+    expect(typeof sum?.removedFailed).toBe("number");
   });
 
   it("bulk DLQ: GET /admin/bulk-dlq-targets previews failed jobs for current filters (admin only)", async () => {

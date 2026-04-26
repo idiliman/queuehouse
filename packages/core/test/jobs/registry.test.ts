@@ -40,6 +40,7 @@ describe("job registry", () => {
       "example.progress",
       "example.success",
       "queuehouse.bulk_dlq",
+      "queuehouse.retention_cleanup",
     ]);
   });
 

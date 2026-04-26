@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { loadConfig } from "@queuehouse/core";
 import {
   recordJobProcessing,
+  recordRetentionRemovals,
   renderWorkerPrometheusText,
   resetWorkerMetricsForTests,
 } from "../src/worker-prometheus";
@@ -42,5 +43,13 @@ describe("worker prometheus", () => {
     expect(body).toContain('result="success"');
     expect(body).toContain('result="error"');
     expect(body).toContain('service="worker"');
+  });
+
+  it("exposes retention removal counter with kind label", async () => {
+    recordRetentionRemovals(2, 1);
+    const body = await renderWorkerPrometheusText(cfg);
+    expect(body).toContain("queuehouse_retention_removals_total");
+    expect(body).toContain('kind="completed"');
+    expect(body).toContain('kind="failed"');
   });
 });

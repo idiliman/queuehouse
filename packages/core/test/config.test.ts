@@ -15,6 +15,9 @@ describe("loadConfig", () => {
     expect(c.namespace).toBe("queuehouse");
     expect(c.port).toBe(3000);
     expect(c.workerShutdownGraceMs).toBe(DEFAULT_WORKER_SHUTDOWN_GRACE_MS);
+    expect(c.retention.completedJobMs).toBe(7 * 86_400_000);
+    expect(c.retention.failedJobMs).toBe(30 * 86_400_000);
+    expect(c.retention.systemQueueMs).toBe(14 * 86_400_000);
   });
 
   it("parses WORKER_SHUTDOWN_GRACE_MS", () => {

@@ -6,7 +6,11 @@ export {
   exampleProgressJob,
   exampleSuccessJob,
 } from "./examples";
-export { BULK_DLQ_MAX_TARGETS, queuehouseBulkDlqJob } from "./system-jobs";
+export {
+  BULK_DLQ_MAX_TARGETS,
+  queuehouseBulkDlqJob,
+  queuehouseRetentionCleanupJob,
+} from "./system-jobs";
 export { runExampleJobSync } from "./example-runtime";
 export { JobUnrecoverableError, isJobUnrecoverableError } from "./job-errors";
 export {

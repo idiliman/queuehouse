@@ -25,7 +25,23 @@ const jobProcessingTotal = new Counter({
   registers: [promRegistry],
 });
 
+const retentionRemovals = new Counter({
+  name: "queuehouse_retention_removals_total",
+  help: "Jobs removed by the queuehouse.retention_cleanup system job (Bull queue.clean).",
+  labelNames: ["kind"] as const,
+  registers: [promRegistry],
+});
+
 export type JobProcessingResult = "success" | "error";
+
+export function recordRetentionRemovals(removedCompleted: number, removedFailed: number): void {
+  if (removedCompleted > 0) {
+    retentionRemovals.inc({ kind: "completed" }, removedCompleted);
+  }
+  if (removedFailed > 0) {
+    retentionRemovals.inc({ kind: "failed" }, removedFailed);
+  }
+}
 
 export function recordJobProcessing(params: {
   queue: string;

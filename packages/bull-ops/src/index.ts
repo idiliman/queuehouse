@@ -1,6 +1,10 @@
 import { Queue, type Job } from "bullmq";
 import type IORedis from "ioredis";
-import { bullmqPrefix, listRegisteredJobs, type QueuehouseConfig } from "@queuehouse/core";
+import {
+  bullmqPrefix,
+  listRegisteredJobs,
+  type QueuehouseConfig,
+} from "@queuehouse/core";
 
 const queueInstances = new Map<string, Queue>();
 
@@ -105,4 +109,84 @@ export async function runBulkDlqOperation(
     }
   }
   return { requested: total, executed, skipped, failed };
+}
+
+const systemQueue = "queuehouse-system";
+const DEFAULT_RETENTION_REMOVAL_CAP = 50_000;
+const RETENTION_BATCH_SIZE = 1_000;
+
+/**
+ * Time-based job removal across all registered operator queues, using BullMQ `queue.clean` grace
+ * (jobs must be at least that old in the given list). Pass `0` ms in policy to skip a category;
+ * a category with grace `0` never removes.
+ */
+export async function runRetentionCleanup(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  onProgress?: (current: number, cap: number) => void | Promise<void>,
+  options?: { maxRemovalsPerRun?: number },
+): Promise<{
+  removedCompleted: number;
+  removedFailed: number;
+  stoppedDueToCap: boolean;
+}> {
+  const cap = options?.maxRemovalsPerRun ?? DEFAULT_RETENTION_REMOVAL_CAP;
+  const { retention: r } = config;
+  const queues = [...new Set(listRegisteredJobs().map((j) => j.queue))].sort();
+  let removedCompleted = 0;
+  let removedFailed = 0;
+  let total = 0;
+  let stoppedDueToCap = false;
+
+  for (const queueName of queues) {
+    if (total >= cap) {
+      stoppedDueToCap = true;
+      break;
+    }
+    const q = getOrCreateQueue(redis, config, queueName);
+    const isSys = queueName === systemQueue;
+    const completedGrace = isSys ? r.systemQueueMs : r.completedJobMs;
+    const failedGrace = isSys ? r.systemQueueMs : r.failedJobMs;
+
+    if (completedGrace > 0) {
+      for (;;) {
+        if (total >= cap) {
+          stoppedDueToCap = true;
+          break;
+        }
+        const n = await q.clean(
+          completedGrace,
+          Math.min(RETENTION_BATCH_SIZE, cap - total),
+          "completed",
+        );
+        removedCompleted += n.length;
+        total += n.length;
+        if (onProgress) await onProgress(total, cap);
+        if (n.length === 0) break;
+      }
+    }
+    if (total >= cap) {
+      stoppedDueToCap = true;
+      break;
+    }
+
+    if (failedGrace > 0) {
+      for (;;) {
+        if (total >= cap) {
+          stoppedDueToCap = true;
+          break;
+        }
+        const n = await q.clean(failedGrace, Math.min(RETENTION_BATCH_SIZE, cap - total), "failed");
+        removedFailed += n.length;
+        total += n.length;
+        if (onProgress) await onProgress(total, cap);
+        if (n.length === 0) break;
+      }
+    }
+  }
+
+  if (total >= cap) {
+    stoppedDueToCap = true;
+  }
+  return { removedCompleted, removedFailed, stoppedDueToCap };
 }

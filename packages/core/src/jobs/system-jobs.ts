@@ -36,3 +36,24 @@ export const queuehouseBulkDlqJob = defineJob({
   redaction: {},
   description: "Applies admin bulk DLQ actions (retry in place or remove) for explicit failed job ids.",
 });
+
+/**
+ * System-only retention cleanup: removes expired completed and failed jobs per `QueuehouseConfig.retention`
+ * using BullMQ `queue.clean` (enqueued with ENQUEUE_INTERNAL, or as a `SCHEDULABLE` cron).
+ */
+export const queuehouseRetentionCleanupJob = defineJob({
+  name: "queuehouse.retention_cleanup",
+  schemaVersion: 1,
+  queue: systemQueue,
+  capabilities: [JOB_CAPABILITY.ENQUEUE_INTERNAL, JOB_CAPABILITY.SCHEDULABLE],
+  input: z.object({}).strict(),
+  output: z.object({
+    removedCompleted: z.number().int().nonnegative(),
+    removedFailed: z.number().int().nonnegative(),
+    stoppedDueToCap: z.boolean(),
+  }),
+  retry: { maxAttempts: 1, backoffMs: 1_000 },
+  timeoutMs: 600_000,
+  redaction: {},
+  description: "Time-based removal of old completed and failed jobs across registered queues (see RETENTION_*_DAYS).",
+});

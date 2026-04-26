@@ -9,6 +9,7 @@ import {
   MANUAL_ENQUEUE_LIMITS,
   mergePayloadWithRetryForEnqueue,
   queuehouseBulkDlqJob,
+  queuehouseRetentionCleanupJob,
   resolveManualEnqueueDelayMs,
   splitJobEnqueueBody,
   structuredLog,
@@ -614,6 +615,31 @@ v1.delete("/api-keys/:id", async (c) => {
   return c.body(null, 204);
 });
 
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Read-only: effective time-based job retention (from `RETENTION_*_DAYS`). Same auth as `GET /jobs`.
+ */
+v1.get("/retention-policy", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" as const }, 401);
+  }
+  if (!hasApiKeyScope(c, "read")) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  const { retention: r } = config;
+  return c.json({
+    completedJobMs: r.completedJobMs,
+    failedJobMs: r.failedJobMs,
+    systemQueueMs: r.systemQueueMs,
+    /** Convenience for UIs; derived from integer-day env (or 0 if ms is 0). */
+    completedJobDays: r.completedJobMs === 0 ? 0 : r.completedJobMs / MS_PER_DAY,
+    failedJobDays: r.failedJobMs === 0 ? 0 : r.failedJobMs / MS_PER_DAY,
+    systemQueueDays: r.systemQueueMs === 0 ? 0 : r.systemQueueMs / MS_PER_DAY,
+  });
+});
+
 /**
  * List jobs (recent slice per queue/state). Requires auth. Does not return raw payload.
  * Query: queue, state (comma list), jobName, jobId, schedulerId, from, to, minAttempts, maxAttempts, limit
@@ -1154,6 +1180,61 @@ v1.post("/admin/bulk-dlq", async (c) => {
       await recordAudit(c, {
         action: AUDIT_ACTION.BULK_DLQ,
         summary: { action: body.action, requested: body.targets.length },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "forbidden" as const }, 403);
+    }
+    throw err;
+  }
+});
+
+/**
+ * Admin: enqueue a system job that runs BullMQ time-based cleanup (`queue.clean`) per `retention-policy`.
+ * Schedulable: add a `JobSchedule` for `queuehouse.retention_cleanup` with `{}` payload for automatic runs.
+ */
+v1.post("/admin/retention-cleanup", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" as const }, 401);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  if (!hasApiKeyScope(c, "admin")) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  const requestId = c.get("requestId");
+  const redis = getQueuehouseRedis(config);
+  try {
+    const accepted = await enqueueSystemJob(redis, config, {
+      jobName: queuehouseRetentionCleanupJob.name,
+      payload: {},
+      requestId,
+      user: { id: user.id, role: user.role },
+    });
+    await recordAudit(c, {
+      action: AUDIT_ACTION.RETENTION_CLEANUP,
+      summary: {
+        systemJobId: accepted.jobId,
+        systemQueueName: accepted.queueName,
+      },
+      result: AUDIT_RESULT.SUCCESS,
+    });
+    if (config.nodeEnv === "production") {
+      structuredLog(config, "queuehouse-api", "info", "retention_cleanup_enqueued", {
+        requestId,
+        systemJobId: accepted.jobId,
+        actor: `${user.role}:${user.id}`,
+      });
+    }
+    return c.json({ ...accepted, requestId, retention: true as const });
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code === "unknown_job" || code === "enqueue_internal_not_allowed") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.RETENTION_CLEANUP,
+        summary: {},
         result: AUDIT_RESULT.FAILURE,
         errorCode: code,
       });
