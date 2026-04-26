@@ -20,8 +20,9 @@ import {
   exampleProgressJob,
   exampleSuccessJob,
   loadConfig,
-  runJobFromQueueData,
+  queuehouseBulkDlqJob,
 } from "@queuehouse/core";
+import { createBullJobProcessor } from "../../worker/src/process-job";
 import { prisma } from "@queuehouse/db";
 import type { ApiVariables } from "../src/api-types";
 
@@ -90,6 +91,7 @@ integrationDescribe("Enqueue through worker (integration)", () => {
   let app: Hono<{ Variables: ApiVariables }>;
   let redis: IORedis | undefined;
   let worker: Worker | undefined;
+  let workerSystem: Worker | undefined;
 
   beforeAll(async () => {
     const apiConfig = (await import("../src/config")).config;
@@ -104,15 +106,19 @@ integrationDescribe("Enqueue through worker (integration)", () => {
       requireDatabaseUrl: false,
     });
     expect(workerCfg.redisUrl).toBe(apiConfig.redisUrl);
-    worker = new Worker(
-      exampleSuccessJob.queue,
-      async (job) => runJobFromQueueData(job.data),
+    const processor = createBullJobProcessor(redis, workerCfg);
+    worker = new Worker(exampleSuccessJob.queue, processor, { connection: redis, prefix, concurrency: 2 });
+    await worker.waitUntilReady();
+    workerSystem = new Worker(
+      queuehouseBulkDlqJob.queue,
+      createBullJobProcessor(redis, workerCfg),
       { connection: redis, prefix, concurrency: 2 },
     );
-    await worker.waitUntilReady();
+    await workerSystem.waitUntilReady();
   });
 
   afterAll(async () => {
+    await workerSystem?.close();
     await worker?.close();
     await redis?.quit();
     await prisma.$disconnect();
@@ -526,6 +532,67 @@ integrationDescribe("Enqueue through worker (integration)", () => {
       { method: "DELETE", headers: { Cookie: adminCookie } },
     );
     expect(delAd.status).toBe(204);
+  });
+
+  it("bulk DLQ: system job removes selected failed jobs", async () => {
+    await prisma.user.create({
+      data: {
+        email: "admin-bulk-dlq@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin-bulk-dlq@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const adminCookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+
+    const targets: { jobId: string; queueName: string }[] = [];
+    for (let i = 0; i < 2; i++) {
+      const enq = await app.request("/api/v1/jobs/example.dlq/enqueue", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: adminCookie,
+          "X-Request-Id": `req_bulk_dlq_${i}`,
+        },
+        body: JSON.stringify({ errorMessage: "bulk remove test" }),
+      });
+      expect(enq.status).toBe(200);
+      targets.push((await enq.json()) as { jobId: string; queueName: string });
+    }
+    for (const t of targets) {
+      await waitForJobState(adminCookie, t.queueName, t.jobId, "failed");
+    }
+
+    const bulk = await app.request("/api/v1/admin/bulk-dlq", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: adminCookie,
+        "X-Request-Id": "req_bulk_op",
+      },
+      body: JSON.stringify({
+        action: "remove",
+        targets: targets.map((j) => ({ queueName: j.queueName, jobId: j.jobId })),
+      }),
+    });
+    expect(bulk.status).toBe(200);
+    const bulkJson = (await bulk.json()) as { jobId: string; queueName: string; bulk: boolean };
+    expect(bulkJson.bulk).toBe(true);
+    expect(bulkJson.queueName).toBe(queuehouseBulkDlqJob.queue);
+    await waitForJobState(adminCookie, bulkJson.queueName, bulkJson.jobId, "completed");
+
+    for (const t of targets) {
+      const g = await app.request(
+        `/api/v1/jobs/${encodeURIComponent(t.queueName)}/${encodeURIComponent(t.jobId)}`,
+        { headers: { Cookie: adminCookie } },
+      );
+      expect(g.status).toBe(404);
+    }
   });
 
   it("DLQ: enqueue retry override exhausts configured attempts on example.fail", async () => {

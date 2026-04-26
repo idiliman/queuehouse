@@ -14,6 +14,7 @@
       "dependencies": {
         "@hono/zod-openapi": "0.18.0",
         "@prisma/client": "^6.3.1",
+        "@queuehouse/bull-ops": "workspace:*",
         "@queuehouse/core": "workspace:*",
         "@queuehouse/db": "workspace:*",
         "@scalar/hono-api-reference": "^0.10.10",
@@ -52,10 +53,24 @@
       "name": "@queuehouse/worker",
       "version": "0.0.0",
       "dependencies": {
+        "@queuehouse/bull-ops": "workspace:*",
         "@queuehouse/core": "workspace:*",
         "bullmq": "^5.40.0",
         "ioredis": "^5.6.0",
         "prom-client": "^15.1.3",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.7.3",
+      },
+    },
+    "packages/bull-ops": {
+      "name": "@queuehouse/bull-ops",
+      "version": "0.0.0",
+      "dependencies": {
+        "@queuehouse/core": "workspace:*",
+        "bullmq": "^5.40.0",
+        "ioredis": "^5.6.0",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -234,6 +249,8 @@
     "@prisma/get-platform": ["@prisma/get-platform@6.19.3", "", { "dependencies": { "@prisma/debug": "6.19.3" } }, "sha512-xFj1VcJ1N3MKooOQAGO0W5tsd0W2QzIvW7DD7c/8H14Zmp4jseeWAITm+w2LLoLrlhoHdPPh0NMZ8mfL6puoHA=="],
 
     "@queuehouse/api": ["@queuehouse/api@workspace:apps/api"],
+
+    "@queuehouse/bull-ops": ["@queuehouse/bull-ops@workspace:packages/bull-ops"],
 
     "@queuehouse/client": ["@queuehouse/client@workspace:packages/client"],
 

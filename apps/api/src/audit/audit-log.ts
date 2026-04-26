@@ -16,6 +16,7 @@ export const AUDIT_ACTION = {
   QUEUE_PAUSE: "queue.pause",
   QUEUE_RESUME: "queue.resume",
   JOB_RAW_REVEAL: "job.raw_reveal",
+  BULK_DLQ: "job.bulk_dlq",
 } as const;
 
 export const AUDIT_RESULT = {

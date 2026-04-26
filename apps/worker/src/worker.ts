@@ -6,7 +6,6 @@ import {
   listRegisteredJobs,
   loadConfig,
   QUEUEHOUSE_VERSION,
-  runJobFromQueueData,
   structuredLog,
   WORKER_HEARTBEAT_REFRESH_MS,
   WORKER_HEARTBEAT_TTL_SEC,
@@ -16,6 +15,7 @@ import {
 import { UnrecoverableError, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { bullmqWorkerGracefulShutdown } from "./bullmq-graceful-shutdown";
+import { createBullJobProcessor } from "./process-job";
 import {
   recordJobProcessing,
   renderWorkerPrometheusText,
@@ -33,6 +33,8 @@ const connection = new IORedis(config.redisUrl!, { maxRetriesPerRequest: null })
 const prefix = bullmqPrefix(config.namespace);
 const uniqueQueues = [...new Set(listRegisteredJobs().map((j) => j.queue))];
 
+const processQueueJob = createBullJobProcessor(connection, config);
+
 const workers = uniqueQueues.map(
   (queueName) =>
     new Worker(
@@ -42,7 +44,7 @@ const workers = uniqueQueues.map(
         const jobName = data.jobName ?? "unknown";
         const t0 = performance.now();
         try {
-          const out = await runJobFromQueueData(job.data);
+          const out = await processQueueJob(job);
           recordJobProcessing({
             queue: queueName,
             jobName,

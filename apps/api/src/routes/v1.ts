@@ -2,11 +2,13 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
 import {
+  BULK_DLQ_MAX_TARGETS,
   getRegisteredJob,
   JOB_CAPABILITY,
   listRegisteredJobs,
   MANUAL_ENQUEUE_LIMITS,
   mergePayloadWithRetryForEnqueue,
+  queuehouseBulkDlqJob,
   resolveManualEnqueueDelayMs,
   splitJobEnqueueBody,
   structuredLog,
@@ -27,6 +29,7 @@ import {
 import type { ApiVariables } from "../api-types";
 import {
   enqueueManualUiJob,
+  enqueueSystemJob,
   getBullJobName,
   getJobDetail,
   getUnredactedPayloadResult,
@@ -970,6 +973,109 @@ v1.delete("/jobs/:queueName/:jobId", async (c) => {
     });
   }
   return c.body(null, 204);
+});
+
+const bulkDlqRequestBody = z
+  .object({
+    action: z.enum(["retry", "remove"]),
+    targets: z
+      .array(
+        z.object({
+          queueName: z.string().min(1),
+          jobId: z.string().min(1),
+        }),
+      )
+      .min(1)
+      .max(BULK_DLQ_MAX_TARGETS),
+  })
+  .strict();
+
+/**
+ * Admin: enqueue a system job that applies bulk DLQ recovery (retry in place or remove) for selected failed jobs.
+ */
+v1.post("/admin/bulk-dlq", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" as const }, 401);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  if (!hasApiKeyScope(c, "admin")) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  let body: z.infer<typeof bulkDlqRequestBody>;
+  try {
+    body = bulkDlqRequestBody.parse(await c.req.json());
+  } catch (err) {
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    return c.json({ error: "invalid_json" as const }, 400);
+  }
+  const redis = getQueuehouseRedis(config);
+  if (c.get("apiKey")) {
+    for (const t of body.targets) {
+      const jn = await getBullJobName(redis, config, t.queueName, t.jobId);
+      if (jn && !isApiKeyJobAllowed(c, jn)) {
+        return c.json({ error: "forbidden" as const }, 403);
+      }
+    }
+  }
+  const requestId = c.get("requestId");
+  try {
+    const accepted = await enqueueSystemJob(redis, config, {
+      jobName: queuehouseBulkDlqJob.name,
+      payload: {
+        action: body.action,
+        targets: body.targets,
+        bulkRequestId: requestId,
+      },
+      requestId,
+      user: { id: user.id, role: user.role },
+    });
+    await recordAudit(c, {
+      action: AUDIT_ACTION.BULK_DLQ,
+      summary: {
+        action: body.action,
+        requested: body.targets.length,
+        systemJobId: accepted.jobId,
+        systemQueueName: accepted.queueName,
+      },
+      result: AUDIT_RESULT.SUCCESS,
+    });
+    if (config.nodeEnv === "production") {
+      structuredLog(config, "queuehouse-api", "info", "bulk_dlq_enqueued", {
+        requestId,
+        action: body.action,
+        requested: body.targets.length,
+        systemJobId: accepted.jobId,
+        actor: `${user.role}:${user.id}`,
+      });
+    }
+    return c.json({ ...accepted, requestId, bulk: true as const });
+  } catch (err) {
+    if (err instanceof ZodError) {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.BULK_DLQ,
+        summary: { action: body.action, requested: body.targets.length },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "validation_failed",
+      });
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    const code = (err as { code?: string }).code;
+    if (code === "unknown_job" || code === "enqueue_internal_not_allowed") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.BULK_DLQ,
+        summary: { action: body.action, requested: body.targets.length },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: code,
+      });
+      return c.json({ error: "forbidden" as const }, 403);
+    }
+    throw err;
+  }
 });
 
 const scheduleCreateBody = z

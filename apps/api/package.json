@@ -12,6 +12,7 @@
   "dependencies": {
     "@hono/zod-openapi": "0.18.0",
     "@prisma/client": "^6.3.1",
+    "@queuehouse/bull-ops": "workspace:*",
     "@queuehouse/core": "workspace:*",
     "@queuehouse/db": "workspace:*",
     "@scalar/hono-api-reference": "^0.10.10",

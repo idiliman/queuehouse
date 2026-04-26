@@ -39,6 +39,7 @@ describe("job registry", () => {
       "example.fail",
       "example.progress",
       "example.success",
+      "queuehouse.bulk_dlq",
     ]);
   });
 

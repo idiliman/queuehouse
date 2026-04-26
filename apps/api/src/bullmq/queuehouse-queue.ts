@@ -1,4 +1,5 @@
 import { Queue, QueueEvents, type Job, type JobType } from "bullmq";
+import { getOrCreateQueue, removeFailedJob, retryFailedJobInPlace } from "@queuehouse/bull-ops";
 import type IORedis from "ioredis";
 import {
   bullmqPrefix,
@@ -16,26 +17,8 @@ import {
   type QueuehouseConfig,
   type WorkerHeartbeatPayload,
 } from "@queuehouse/core";
-const queueInstances = new Map<string, Queue>();
 
-function queueCacheKey(prefix: string, queueName: string): string {
-  return `${prefix}\0${queueName}`;
-}
-
-export function getOrCreateQueue(
-  redis: IORedis,
-  config: QueuehouseConfig,
-  queueName: string,
-): Queue {
-  const prefix = bullmqPrefix(config.namespace);
-  const key = queueCacheKey(prefix, queueName);
-  let q = queueInstances.get(key);
-  if (!q) {
-    q = new Queue(queueName, { connection: redis, prefix });
-    queueInstances.set(key, q);
-  }
-  return q;
-}
+export { getOrCreateQueue, removeFailedJob, retryFailedJobInPlace } from "@queuehouse/bull-ops";
 
 export type EnqueueAccepted = {
   jobId: string;
@@ -54,9 +37,10 @@ async function addQueueJob(
     retriedAsNewFrom?: { queueName: string; jobId: string };
     /** BullMQ job options: delay (ms from now), custom id, priority (0 = highest). */
     schedule?: { delay?: number; jobId?: string; priority?: number };
+    source?: "api" | "ui" | "schedule" | "system";
   },
 ): Promise<{ jobId: string; queueName: string; bullJob: Job }> {
-  const { job, payload, eff, requestId, user, retriedAsNewFrom, schedule } = params;
+  const { job, payload, eff, requestId, user, retriedAsNewFrom, schedule, source } = params;
   const queue = getOrCreateQueue(redis, config, job.queue);
   const data: {
     jobName: string;
@@ -64,6 +48,7 @@ async function addQueueJob(
     requestId: string;
     enqueuedBy: { userId: string; role: string };
     retriedAsNewFrom?: { queueName: string; jobId: string };
+    source?: "api" | "ui" | "schedule" | "system";
   } = {
     jobName: job.name,
     payload,
@@ -72,6 +57,9 @@ async function addQueueJob(
   };
   if (retriedAsNewFrom) {
     data.retriedAsNewFrom = retriedAsNewFrom;
+  }
+  if (source) {
+    data.source = source;
   }
   const addOpts: Parameters<Queue["add"]>[2] = {
     attempts: eff.maxAttempts,
@@ -155,6 +143,44 @@ export async function enqueueAuthenticatedJob(
     eff,
     requestId: params.requestId,
     user: params.user,
+    source: "api",
+  });
+  return { jobId: r.jobId, queueName: r.queueName };
+}
+
+/**
+ * Enqueue a job that requires `ENQUEUE_INTERNAL` (operator system operations).
+ */
+export async function enqueueSystemJob(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  params: {
+    jobName: string;
+    payload: unknown;
+    requestId: string;
+    user: { id: string; role: string };
+  },
+): Promise<EnqueueAccepted> {
+  const job = getRegisteredJob(params.jobName);
+  if (!job) {
+    const e = new Error("unknown_job") as Error & { code?: string };
+    e.code = "unknown_job";
+    throw e;
+  }
+  if (!job.capabilities.includes(JOB_CAPABILITY.ENQUEUE_INTERNAL)) {
+    const e = new Error("enqueue_internal_not_allowed") as Error & { code?: string };
+    e.code = "enqueue_internal_not_allowed";
+    throw e;
+  }
+  job.inputSchema.parse(params.payload);
+  const eff = getEffectiveRetryOptions(job);
+  const r = await addQueueJob(redis, config, {
+    job: { name: job.name, queue: job.queue },
+    payload: params.payload,
+    eff,
+    requestId: params.requestId,
+    user: params.user,
+    source: "system",
   });
   return { jobId: r.jobId, queueName: r.queueName };
 }
@@ -208,6 +234,7 @@ export async function enqueueManualUiJob(
     requestId: params.requestId,
     user: params.user,
     schedule,
+    source: "ui",
   });
 
   if (params.waitTimeoutMs <= 0) {
@@ -308,6 +335,7 @@ export async function retryFailedJobAsNew(
       queueName: params.sourceQueueName,
       jobId: params.sourceJobId,
     },
+    source: "api",
   });
   return { jobId: r.jobId, queueName: r.queueName };
 }
@@ -586,54 +614,6 @@ export async function getJobDetail(
     requestId: data.requestId,
     resolvedRetry,
   };
-}
-
-/**
- * Retry a failed job in place (BullMQ moves it back to waiting). Admin-only at route layer.
- */
-export async function retryFailedJobInPlace(
-  redis: IORedis,
-  config: QueuehouseConfig,
-  queueName: string,
-  jobId: string,
-): Promise<{ ok: true } | { error: "job_not_found" | "forbidden_queue" | "invalid_state" }> {
-  const regQueues = new Set(listRegisteredJobs().map((j) => j.queue));
-  if (!regQueues.has(queueName)) {
-    return { error: "forbidden_queue" };
-  }
-  const queue = getOrCreateQueue(redis, config, queueName);
-  const job: Job | undefined = await queue.getJob(jobId);
-  if (!job) return { error: "job_not_found" };
-  const state = await job.getState();
-  if (state !== "failed") {
-    return { error: "invalid_state" };
-  }
-  await job.retry("failed");
-  return { ok: true };
-}
-
-/**
- * Remove a failed job from Redis. Admin-only at route layer.
- */
-export async function removeFailedJob(
-  redis: IORedis,
-  config: QueuehouseConfig,
-  queueName: string,
-  jobId: string,
-): Promise<{ ok: true } | { error: "job_not_found" | "forbidden_queue" | "invalid_state" }> {
-  const regQueues = new Set(listRegisteredJobs().map((j) => j.queue));
-  if (!regQueues.has(queueName)) {
-    return { error: "forbidden_queue" };
-  }
-  const queue = getOrCreateQueue(redis, config, queueName);
-  const job: Job | undefined = await queue.getJob(jobId);
-  if (!job) return { error: "job_not_found" };
-  const state = await job.getState();
-  if (state !== "failed") {
-    return { error: "invalid_state" };
-  }
-  await job.remove();
-  return { ok: true };
 }
 
 async function scanRedisKeys(redis: IORedis, pattern: string): Promise<string[]> {
