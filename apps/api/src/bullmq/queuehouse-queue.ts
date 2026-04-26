@@ -11,7 +11,6 @@ import {
   splitJobEnqueueBody,
   type QueuehouseConfig,
 } from "@queuehouse/core";
-
 const queueInstances = new Map<string, Queue>();
 
 function queueCacheKey(prefix: string, queueName: string): string {
@@ -38,6 +37,59 @@ export type EnqueueAccepted = {
   queueName: string;
 };
 
+function mergeObjectPayloadWithRetry(payload: unknown, retry: unknown): unknown {
+  if (retry === undefined) return payload;
+  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+    return { ...(payload as Record<string, unknown>), retry };
+  }
+  const e = new Error("retry_with_non_object_payload") as Error & { code?: string };
+  e.code = "retry_with_non_object_payload";
+  throw e;
+}
+
+async function addQueueJob(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  params: {
+    job: { name: string; queue: string };
+    payload: unknown;
+    eff: { maxAttempts: number; backoffMs?: number };
+    requestId: string;
+    user: { id: string; role: string };
+    retriedAsNewFrom?: { queueName: string; jobId: string };
+  },
+): Promise<EnqueueAccepted> {
+  const { job, payload, eff, requestId, user, retriedAsNewFrom } = params;
+  const queue = getOrCreateQueue(redis, config, job.queue);
+  const data: {
+    jobName: string;
+    payload: unknown;
+    requestId: string;
+    enqueuedBy: { userId: string; role: string };
+    retriedAsNewFrom?: { queueName: string; jobId: string };
+  } = {
+    jobName: job.name,
+    payload,
+    requestId,
+    enqueuedBy: { userId: user.id, role: user.role },
+  };
+  if (retriedAsNewFrom) {
+    data.retriedAsNewFrom = retriedAsNewFrom;
+  }
+  const bullJob = await queue.add(job.name, data, {
+    attempts: eff.maxAttempts,
+    backoff: eff.backoffMs
+      ? { type: "fixed" as const, delay: eff.backoffMs }
+      : undefined,
+    removeOnComplete: { count: 10_000 },
+    removeOnFail: false,
+  });
+  if (bullJob.id === undefined || bullJob.id === null) {
+    throw new Error("bullmq_missing_job_id");
+  }
+  return { jobId: String(bullJob.id), queueName: job.queue };
+}
+
 export async function enqueueAuthenticatedJob(
   redis: IORedis,
   config: QueuehouseConfig,
@@ -63,28 +115,89 @@ export async function enqueueAuthenticatedJob(
   job.inputSchema.parse(payload);
 
   const eff = resolveBullmqRetryForEnqueue(job, retryOverride);
-  const queue = getOrCreateQueue(redis, config, job.queue);
-  const bullJob = await queue.add(
-    params.jobName,
-    {
-      jobName: params.jobName,
-      payload,
-      requestId: params.requestId,
-      enqueuedBy: { userId: params.user.id, role: params.user.role },
-    },
-    {
-      attempts: eff.maxAttempts,
-      backoff: eff.backoffMs
-        ? { type: "fixed" as const, delay: eff.backoffMs }
-        : undefined,
-      removeOnComplete: { count: 10_000 },
-      removeOnFail: false,
-    },
-  );
-  if (bullJob.id === undefined || bullJob.id === null) {
-    throw new Error("bullmq_missing_job_id");
+  return addQueueJob(redis, config, {
+    job: { name: job.name, queue: job.queue },
+    payload,
+    eff,
+    requestId: params.requestId,
+    user: params.user,
+  });
+}
+
+/**
+ * Enqueue a new job with an optional edited payload, linked to a source failed job (admin recovery).
+ * Does not require ENQUEUE_API on the job type.
+ */
+export async function retryFailedJobAsNew(
+  redis: IORedis,
+  config: QueuehouseConfig,
+  params: {
+    sourceQueueName: string;
+    sourceJobId: string;
+    /**
+     * Body from the client. Use `splitJobEnqueueBody`-compatible shape: optional `payload`
+     * (omitted or absent key → use source job stored payload) and optional `retry` for overrides.
+     */
+    body: unknown;
+    requestId: string;
+    user: { id: string; role: string };
+  },
+): Promise<
+  | EnqueueAccepted
+  | { error: "job_not_found" | "forbidden_queue" | "invalid_state" | "unknown_job" }
+> {
+  const regQueues = new Set(listRegisteredJobs().map((j) => j.queue));
+  if (!regQueues.has(params.sourceQueueName)) {
+    return { error: "forbidden_queue" };
   }
-  return { jobId: String(bullJob.id), queueName: job.queue };
+  const queue = getOrCreateQueue(redis, config, params.sourceQueueName);
+  const bull: Job | undefined = await queue.getJob(params.sourceJobId);
+  if (!bull) return { error: "job_not_found" };
+  const state = await bull.getState();
+  if (state !== "failed") {
+    return { error: "invalid_state" };
+  }
+  const sourceData = bull.data as {
+    jobName?: string;
+    payload?: unknown;
+  };
+  const jobName = sourceData.jobName;
+  if (!jobName) {
+    return { error: "invalid_state" };
+  }
+  const reg = getRegisteredJob(jobName);
+  if (!reg) {
+    return { error: "unknown_job" };
+  }
+  const bodyObj = params.body;
+  if (bodyObj === null || typeof bodyObj !== "object" || Array.isArray(bodyObj)) {
+    const e = new Error("invalid_body") as Error & { code?: string };
+    e.code = "invalid_body";
+    throw e;
+  }
+  const rec = bodyObj as Record<string, unknown>;
+  const hasPayloadKey = Object.prototype.hasOwnProperty.call(rec, "payload");
+  const base = sourceData.payload;
+  const chosenPayload = hasPayloadKey
+    ? (rec as { payload?: unknown }).payload === undefined
+      ? base
+      : (rec as { payload: unknown }).payload
+    : base;
+  const forSplit = mergeObjectPayloadWithRetry(chosenPayload, rec.retry);
+  const { payload, retryOverride } = splitJobEnqueueBody(reg, forSplit);
+  reg.inputSchema.parse(payload);
+  const eff = resolveBullmqRetryForEnqueue(reg, retryOverride);
+  return addQueueJob(redis, config, {
+    job: { name: reg.name, queue: reg.queue },
+    payload,
+    eff,
+    requestId: params.requestId,
+    user: params.user,
+    retriedAsNewFrom: {
+      queueName: params.sourceQueueName,
+      jobId: params.sourceJobId,
+    },
+  });
 }
 
 const DEFAULT_LIST_JOB_TYPES: JobType[] = [
@@ -256,6 +369,7 @@ export type JobDetailResult = {
     maxAttempts?: number;
     repeatJobKey?: string;
     deduplicationId?: string;
+    retriedAsNewFrom?: { queueName: string; jobId: string };
   };
   timestamps: { created?: number; processed?: number; finished?: number };
   requestId?: string;
@@ -278,6 +392,7 @@ export async function getJobDetail(
     payload?: unknown;
     requestId?: string;
     enqueuedBy?: { userId: string; role: string };
+    retriedAsNewFrom?: { queueName: string; jobId: string };
   };
   const { payload: redactedPayload, result: redactedResult } = redactForRegisteredJob(
     data.jobName,
@@ -313,6 +428,7 @@ export async function getJobDetail(
       maxAttempts: job.opts?.attempts,
       repeatJobKey: job.repeatJobKey,
       deduplicationId: job.deduplicationId,
+      retriedAsNewFrom: data.retriedAsNewFrom,
     },
     timestamps: {
       created: job.timestamp,

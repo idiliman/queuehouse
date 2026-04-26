@@ -21,6 +21,15 @@ describe("runJobFromQueueData", () => {
     expect(out).toEqual({ echoed: "hello" });
   });
 
+  it("allows retriedAsNewFrom metadata on the envelope", () => {
+    const out = runJobFromQueueData({
+      jobName: exampleSuccessJob.name,
+      payload: { message: "hello" },
+      retriedAsNewFrom: { queueName: "queuehouse-example", jobId: "99" },
+    });
+    expect(out).toEqual({ echoed: "hello" });
+  });
+
   it("rejects unknown job names", () => {
     expect(() =>
       runJobFromQueueData({

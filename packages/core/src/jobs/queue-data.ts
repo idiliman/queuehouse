@@ -13,6 +13,13 @@ export const queueJobDataSchema = z.object({
       role: z.string(),
     })
     .optional(),
+  /** Set when an admin enqueues a replacement job from a failed job (DLQ recovery). */
+  retriedAsNewFrom: z
+    .object({
+      queueName: z.string().min(1),
+      jobId: z.string().min(1),
+    })
+    .optional(),
 });
 
 export type QueueJobData = z.infer<typeof queueJobDataSchema>;

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { ZodError } from "zod";
 import { prisma } from "@queuehouse/db";
 import { config } from "../config";
 import { corsAllowedOrigins } from "../cors";
@@ -14,6 +15,7 @@ import {
   getJobDetail,
   listJobs,
   removeFailedJob,
+  retryFailedJobAsNew,
   retryFailedJobInPlace,
 } from "../bullmq/queuehouse-queue";
 import { getQueuehouseRedis } from "../bullmq/redis";
@@ -191,6 +193,82 @@ v1.post("/jobs/:queueName/:jobId/retry", async (c) => {
     return c.json({ error: "invalid_state" }, 400);
   }
   return c.json({ ok: true as const });
+});
+
+/**
+ * Enqueue a new job from a failed one (admin DLQ recovery). Optional JSON body: `{ "payload"?: <job input>, "retry"?: { ... } }`.
+ * Omitted `payload` reuses the failed job’s stored payload (use when redaction hid fields).
+ */
+v1.post("/jobs/:queueName/:jobId/retry-as-new", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const queueName = c.req.param("queueName");
+  const jobId = c.req.param("jobId");
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json" as const }, 400);
+  }
+  const requestId = c.get("requestId");
+  const redis = getQueuehouseRedis(config);
+  function isZodIssuesError(err: unknown): err is { issues: unknown } {
+    return (
+      typeof err === "object" &&
+      err !== null &&
+      "issues" in err &&
+      Array.isArray((err as { issues: unknown }).issues)
+    );
+  }
+  try {
+    const result = await retryFailedJobAsNew(redis, config, {
+      sourceQueueName: queueName,
+      sourceJobId: jobId,
+      body: body === undefined || body === null ? {} : body,
+      requestId,
+      user: { id: user.id, role: user.role },
+    });
+    if ("error" in result) {
+      if (result.error === "job_not_found") {
+        return c.json({ error: "job_not_found" as const }, 404);
+      }
+      if (result.error === "forbidden_queue") {
+        return c.json({ error: "forbidden_queue" as const }, 400);
+      }
+      if (result.error === "unknown_job") {
+        return c.json({ error: "unknown_job" as const }, 400);
+      }
+      return c.json({ error: "invalid_state" as const }, 400);
+    }
+    return c.json({ ...result, requestId });
+  } catch (err) {
+    if (err instanceof ZodError || isZodIssuesError(err)) {
+      const issues = err instanceof ZodError ? err.issues : (err as { issues: unknown }).issues;
+      return c.json({ error: "validation_failed" as const, issues }, 400);
+    }
+    const code = (err as { code?: string }).code;
+    if (code === "invalid_body") {
+      return c.json({ error: "invalid_json" as const }, 400);
+    }
+    if (code === "retry_override_not_allowed") {
+      return c.json({ error: "retry_override_not_allowed" as const }, 400);
+    }
+    if (code === "retry_override_invalid") {
+      return c.json({ error: "retry_override_invalid" as const }, 400);
+    }
+    if (code === "retry_override_out_of_range") {
+      return c.json({ error: "retry_override_out_of_range" as const }, 400);
+    }
+    if (code === "retry_with_non_object_payload") {
+      return c.json({ error: "retry_with_non_object_payload" as const }, 400);
+    }
+    throw err;
+  }
 });
 
 v1.delete("/jobs/:queueName/:jobId", async (c) => {

@@ -336,6 +336,82 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     expect(del1.status).toBe(204);
   });
 
+  it("DLQ: admin retry-as-new enqueues linked job and validates payload", async () => {
+    await prisma.user.create({
+      data: {
+        email: "admin-ran@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin-ran@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const adminCookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+
+    const enq = await app.request("/api/v1/jobs/example.dlq/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: adminCookie, "X-Request-Id": "req_ran" },
+      body: JSON.stringify({ errorMessage: "source failed" }),
+    });
+    expect(enq.status).toBe(200);
+    const acc = (await enq.json()) as { jobId: string; queueName: string };
+    await waitForJobState(adminCookie, acc.queueName, acc.jobId, "failed");
+
+    const bad = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}/retry-as-new`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie },
+        body: JSON.stringify({ payload: { unrecoverable: "not-a-boolean" } }),
+      },
+    );
+    expect(bad.status).toBe(400);
+    const badBody = (await bad.json()) as { error?: string };
+    expect(badBody.error).toBe("validation_failed");
+
+    const ran = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}/retry-as-new`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: adminCookie, "X-Request-Id": "req_ran2" },
+        body: JSON.stringify({ payload: { errorMessage: "from retry as new" } }),
+      },
+    );
+    expect(ran.status).toBe(200);
+    const accepted = (await ran.json()) as { jobId: string; queueName: string; requestId: string };
+    expect(accepted.requestId).toBe("req_ran2");
+    expect(accepted.jobId).not.toBe(acc.jobId);
+    expect(accepted.queueName).toBe(acc.queueName);
+
+    const resNew = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(accepted.queueName)}/${encodeURIComponent(accepted.jobId)}`,
+      { headers: { Cookie: adminCookie } },
+    );
+    expect(resNew.status).toBe(200);
+    const dNew = (await resNew.json()) as {
+      metadata: { retriedAsNewFrom?: { queueName: string; jobId: string } };
+    };
+    expect(dNew.metadata.retriedAsNewFrom).toEqual({
+      queueName: acc.queueName,
+      jobId: acc.jobId,
+    });
+
+    const delOld = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(acc.queueName)}/${encodeURIComponent(acc.jobId)}`,
+      { method: "DELETE", headers: { Cookie: adminCookie } },
+    );
+    expect(delOld.status).toBe(204);
+    const delNew = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(accepted.queueName)}/${encodeURIComponent(accepted.jobId)}`,
+      { method: "DELETE", headers: { Cookie: adminCookie } },
+    );
+    expect(delNew.status).toBe(204);
+  });
+
   it("DLQ: viewer cannot retry in place (403)", async () => {
     await prisma.user.create({
       data: {
@@ -380,6 +456,13 @@ integrationDescribe("Enqueue through worker (integration)", () => {
       { method: "POST", headers: { Cookie: vCookie } },
     );
     expect(ret.status).toBe(403);
+
+    const rNew = await app.request(
+      `/api/v1/jobs/${encodeURIComponent(queueName)}/${encodeURIComponent(jobId)}/retry-as-new`,
+      { method: "POST", headers: { "Content-Type": "application/json", Cookie: vCookie },
+      body: JSON.stringify({}) },
+    );
+    expect(rNew.status).toBe(403);
 
     const del = await app.request(
       `/api/v1/jobs/${encodeURIComponent(queueName)}/${encodeURIComponent(jobId)}`,

@@ -1,5 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 type JobDetail = {
   jobId: string;
@@ -21,6 +21,7 @@ type JobDetail = {
     maxAttempts?: number;
     repeatJobKey?: string;
     deduplicationId?: string;
+    retriedAsNewFrom?: { queueName: string; jobId: string };
   };
   timestamps: { created?: number; processed?: number; finished?: number };
   requestId?: string;
@@ -42,11 +43,13 @@ type SessionUser = { id: string; email: string; role: "VIEWER" | "ADMIN" };
 
 export function JobDetailPage() {
   const { queueName, jobId } = useParams<{ queueName: string; jobId: string }>();
+  const navigate = useNavigate();
   const [detail, setDetail] = useState<JobDetail | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [retryAsNewText, setRetryAsNewText] = useState("");
 
   const refetch = useCallback(async () => {
     if (!queueName || !jobId) return;
@@ -154,6 +157,7 @@ export function JobDetailPage() {
     return null;
   }
 
+  const retriedFrom = detail.metadata.retriedAsNewFrom;
   const isAdmin = user?.role === "ADMIN";
   const canDlq = isAdmin && detail.state === "failed";
 
@@ -176,6 +180,54 @@ export function JobDetailPage() {
         return;
       }
       await refetch();
+    } catch {
+      setActionError("Network error.");
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const runRetryAsNew = async () => {
+    if (!queueName || !jobId) return;
+    setActionError(null);
+    setActionBusy(true);
+    let body: unknown = {};
+    const trimmed = retryAsNewText.trim();
+    if (trimmed.length > 0) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed) as unknown;
+      } catch {
+        setActionError("Invalid JSON. Fix the payload or clear the field to reuse the stored job payload.");
+        setActionBusy(false);
+        return;
+      }
+      body = { payload: parsed };
+    }
+    try {
+      const res = await fetch(
+        `/api/v1/jobs/${encodeURIComponent(queueName)}/${encodeURIComponent(jobId)}/retry-as-new`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      if (res.status === 403) {
+        setActionError("Only admins can retry as new.");
+        return;
+      }
+      if (!res.ok) {
+        const b = (await res.json().catch(() => ({}))) as { error?: string };
+        setActionError(b.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      const out = (await res.json()) as { jobId: string; queueName: string };
+      navigate(
+        `/jobs/${encodeURIComponent(out.queueName)}/${encodeURIComponent(out.jobId)}`,
+        { replace: true },
+      );
     } catch {
       setActionError("Network error.");
     } finally {
@@ -253,24 +305,74 @@ export function JobDetailPage() {
         </p>
       ) : null}
       {canDlq ? (
-        <div style={{ marginTop: "0.75rem", display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-          <button
-            type="button"
-            onClick={() => void runRetry()}
-            disabled={actionBusy}
-            style={buttonSm}
+        <div style={{ marginTop: "0.75rem" }}>
+          <p style={{ fontSize: "0.88rem", color: "#333", lineHeight: 1.5, maxWidth: "40rem" }}>
+            <strong>Retry in place</strong> re-runs the same BullMQ job with the same id (when the failure was
+            retryable). <strong>Retry as new</strong> enqueues a <em>separate</em> job; use it after correcting
+            the input. Leave the JSON field empty to reuse the full stored payload (including fields that may
+            be redacted here).
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginTop: "0.5rem" }}>
+            <button
+              type="button"
+              onClick={() => void runRetry()}
+              disabled={actionBusy}
+              style={buttonSm}
+            >
+              Retry in place
+            </button>
+            <button
+              type="button"
+              onClick={() => void runRemove()}
+              disabled={actionBusy}
+              style={buttonSmDanger}
+            >
+              Remove from queue
+            </button>
+          </div>
+          <label
+            style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginTop: "0.9rem" }}
+            htmlFor="retry-as-new-json"
           >
-            Retry in place
-          </button>
-          <button
-            type="button"
-            onClick={() => void runRemove()}
+            Optional new payload (JSON, job input object)
+          </label>
+          <textarea
+            id="retry-as-new-json"
+            value={retryAsNewText}
+            onChange={(e) => setRetryAsNewText(e.target.value)}
+            rows={5}
             disabled={actionBusy}
-            style={buttonSmDanger}
-          >
-            Remove from queue
-          </button>
+            style={{
+              ...preStyle,
+              width: "100%",
+              maxWidth: "36rem",
+              fontFamily: "ui-monospace, monospace",
+              marginTop: "0.35rem",
+            }}
+            placeholder='e.g. { "message": "fixed" }  —  leave empty to reuse stored payload'
+          />
+          <div style={{ marginTop: "0.45rem" }}>
+            <button
+              type="button"
+              onClick={() => void runRetryAsNew()}
+              disabled={actionBusy}
+              style={buttonSm}
+            >
+              Retry as new
+            </button>
+          </div>
         </div>
+      ) : null}
+      {retriedFrom ? (
+        <p style={{ fontSize: "0.88rem", color: "#333", lineHeight: 1.5, marginTop: "0.9rem" }}>
+          <strong>Retried as new from</strong> job{" "}
+          <Link
+            to={`/jobs/${encodeURIComponent(retriedFrom.queueName)}/${encodeURIComponent(retriedFrom.jobId)}`}
+            style={{ color: "#0b57d0" }}
+          >
+            {retriedFrom.queueName}/{retriedFrom.jobId}
+          </Link>
+        </p>
       ) : null}
       {actionError ? (
         <p role="alert" style={{ color: "#b42318", fontSize: "0.9rem", marginTop: "0.5rem" }}>
