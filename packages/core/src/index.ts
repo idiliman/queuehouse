@@ -1,3 +1,5 @@
+import "./load-builtins";
+
 export const QUEUEHOUSE_VERSION = "0.0.0-skeleton";
 
 export {
@@ -7,3 +9,22 @@ export {
   type NodeEnv,
   type QueuehouseConfig,
 } from "./config";
+
+export {
+  JOB_CAPABILITY,
+  clearJobRegistryForTests,
+  defineJob,
+  exampleFailJob,
+  exampleProgressJob,
+  exampleSuccessJob,
+  getRegisteredJob,
+  listRegisteredJobs,
+  registerExampleJobs,
+  registerJob,
+  runExampleJobSync,
+  type DefineJobOptions,
+  type JobCapability,
+  type JobRedactionMeta,
+  type JobRetryDefaults,
+  type RegisteredJob,
+} from "./jobs";
