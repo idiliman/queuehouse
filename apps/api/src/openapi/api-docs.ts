@@ -11,6 +11,7 @@ import {
   type RegisteredJob,
 } from "@queuehouse/core";
 import type { ApiVariables } from "../api-types";
+import { AUDIT_ACTION, AUDIT_RESULT, recordAudit } from "../audit/audit-log";
 import { hasApiKeyScope, isApiKeyJobAllowed } from "../auth/api-key-policy";
 import { enqueueAuthenticatedJob } from "../bullmq/queuehouse-queue";
 import { getQueuehouseRedis } from "../bullmq/redis";
@@ -220,10 +221,22 @@ export function createApiDocsApp(
     app.openapi(route, async (c) => {
       const user = c.get("user")!;
       if (!hasApiKeyScope(c, "enqueue") || !isApiKeyJobAllowed(c, job.name)) {
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { jobName: job.name },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "enqueue_not_allowed",
+        });
         return c.json({ error: "enqueue_not_allowed" as const }, 403);
       }
       const parsed = await readEnqueueJsonBody(c);
       if ("error" in parsed) {
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { jobName: job.name },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "invalid_json",
+        });
         return c.json({ error: "invalid_json" as const }, 400);
       }
       const body = parsed.body;
@@ -236,29 +249,76 @@ export function createApiDocsApp(
           requestId,
           user: { id: user.id, role: user.role },
         });
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { jobName: job.name, newJobId: jobId, queueName },
+          result: AUDIT_RESULT.SUCCESS,
+        });
         return c.json({ jobId, queueName, requestId }, 200);
       } catch (err) {
         if (err instanceof ZodError || isZodIssuesError(err)) {
           const issues = err instanceof ZodError ? err.issues : (err as { issues: unknown }).issues;
+          await recordAudit(c, {
+            action: AUDIT_ACTION.JOB_ENQUEUE,
+            summary: { jobName: job.name },
+            result: AUDIT_RESULT.FAILURE,
+            errorCode: "validation_failed",
+          });
           return c.json({ error: "validation_failed" as const, issues }, 400);
         }
         const code = (err as { code?: string }).code;
         if (code === "unknown_job") {
+          await recordAudit(c, {
+            action: AUDIT_ACTION.JOB_ENQUEUE,
+            summary: { jobName: job.name },
+            result: AUDIT_RESULT.FAILURE,
+            errorCode: "unknown_job",
+          });
           return c.json({ error: "unknown_job" as const }, 400);
         }
         if (code === "enqueue_not_allowed") {
+          await recordAudit(c, {
+            action: AUDIT_ACTION.JOB_ENQUEUE,
+            summary: { jobName: job.name },
+            result: AUDIT_RESULT.FAILURE,
+            errorCode: "enqueue_not_allowed",
+          });
           return c.json({ error: "enqueue_not_allowed" as const }, 403);
         }
         if (code === "retry_override_not_allowed") {
+          await recordAudit(c, {
+            action: AUDIT_ACTION.JOB_ENQUEUE,
+            summary: { jobName: job.name },
+            result: AUDIT_RESULT.FAILURE,
+            errorCode: "retry_override_not_allowed",
+          });
           return c.json({ error: "retry_override_not_allowed" as const }, 400);
         }
         if (code === "retry_override_invalid") {
+          await recordAudit(c, {
+            action: AUDIT_ACTION.JOB_ENQUEUE,
+            summary: { jobName: job.name },
+            result: AUDIT_RESULT.FAILURE,
+            errorCode: "retry_override_invalid",
+          });
           return c.json({ error: "retry_override_invalid" as const }, 400);
         }
         if (code === "retry_override_out_of_range") {
+          await recordAudit(c, {
+            action: AUDIT_ACTION.JOB_ENQUEUE,
+            summary: { jobName: job.name },
+            result: AUDIT_RESULT.FAILURE,
+            errorCode: "retry_override_out_of_range",
+          });
           return c.json({ error: "retry_override_out_of_range" as const }, 400);
         }
         if (code === "retry_with_non_object_payload") {
+          await recordAudit(c, {
+            action: AUDIT_ACTION.JOB_ENQUEUE,
+            summary: { jobName: job.name },
+            result: AUDIT_RESULT.FAILURE,
+            errorCode: "retry_with_non_object_payload",
+          });
           return c.json({ error: "retry_with_non_object_payload" as const }, 400);
         }
         throw err;
@@ -308,6 +368,12 @@ export function createApiDocsApp(
     const user = c.get("user")!;
     const parsed = await readEnqueueJsonBody(c);
     if ("error" in parsed) {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "generic" },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "invalid_json",
+      });
       return c.json({ error: "invalid_json" as const }, 400);
     }
     const envelope = parsed.body as {
@@ -317,9 +383,21 @@ export function createApiDocsApp(
     };
     const jobName = typeof envelope?.jobName === "string" ? envelope.jobName : "";
     if (!jobName) {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "generic" },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "validation_failed",
+      });
       return c.json({ error: "validation_failed" as const, issues: [{ message: "jobName required" }] }, 400);
     }
     if (!hasApiKeyScope(c, "enqueue") || !isApiKeyJobAllowed(c, jobName)) {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "generic", jobName },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "enqueue_not_allowed",
+      });
       return c.json({ error: "enqueue_not_allowed" as const }, 403);
     }
     const requestId = c.get("requestId")!;
@@ -332,29 +410,76 @@ export function createApiDocsApp(
         requestId,
         user: { id: user.id, role: user.role },
       });
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_ENQUEUE,
+        summary: { path: "generic", jobName, newJobId: jobId, queueName },
+        result: AUDIT_RESULT.SUCCESS,
+      });
       return c.json({ jobId, queueName, requestId }, 200);
     } catch (err) {
       if (err instanceof ZodError || isZodIssuesError(err)) {
         const issues = err instanceof ZodError ? err.issues : (err as { issues: unknown }).issues;
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { path: "generic", jobName },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "validation_failed",
+        });
         return c.json({ error: "validation_failed" as const, issues }, 400);
       }
       const code = (err as { code?: string }).code;
       if (code === "unknown_job") {
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { path: "generic", jobName },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "unknown_job",
+        });
         return c.json({ error: "unknown_job" as const }, 400);
       }
       if (code === "enqueue_not_allowed") {
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { path: "generic", jobName },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "enqueue_not_allowed",
+        });
         return c.json({ error: "enqueue_not_allowed" as const }, 403);
       }
       if (code === "retry_override_not_allowed") {
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { path: "generic", jobName },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "retry_override_not_allowed",
+        });
         return c.json({ error: "retry_override_not_allowed" as const }, 400);
       }
       if (code === "retry_override_invalid") {
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { path: "generic", jobName },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "retry_override_invalid",
+        });
         return c.json({ error: "retry_override_invalid" as const }, 400);
       }
       if (code === "retry_override_out_of_range") {
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { path: "generic", jobName },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "retry_override_out_of_range",
+        });
         return c.json({ error: "retry_override_out_of_range" as const }, 400);
       }
       if (code === "retry_with_non_object_payload") {
+        await recordAudit(c, {
+          action: AUDIT_ACTION.JOB_ENQUEUE,
+          summary: { path: "generic", jobName },
+          result: AUDIT_RESULT.FAILURE,
+          errorCode: "retry_with_non_object_payload",
+        });
         return c.json({ error: "retry_with_non_object_payload" as const }, 400);
       }
       throw err;

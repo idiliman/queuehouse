@@ -119,6 +119,7 @@ integrationDescribe("Enqueue through worker (integration)", () => {
 
   beforeEach(async () => {
     await prisma.session.deleteMany();
+    await prisma.auditLog.deleteMany();
     await prisma.user.deleteMany();
   });
 
@@ -158,6 +159,17 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     expect(accepted.requestId).toBe(reqId);
     expect(accepted.queueName).toBe(exampleSuccessJob.queue);
     expect(accepted.jobId.length).toBeGreaterThan(0);
+
+    const auditRow = await prisma.auditLog.findFirst({
+      where: { requestId: reqId, action: "job.enqueue" },
+    });
+    expect(auditRow).not.toBeNull();
+    expect(auditRow?.result).toBe("SUCCESS");
+    expect(auditRow?.errorCode).toBeNull();
+    const sum = auditRow?.summary as Record<string, unknown>;
+    expect(sum?.jobName).toBe("example.success");
+    expect(sum?.newJobId).toBe(accepted.jobId);
+    expect(sum?.queueName).toBe(accepted.queueName);
 
     let lastState = "";
     let detail: Record<string, unknown> | null = null;
@@ -590,5 +602,87 @@ integrationDescribe("Enqueue through worker (integration)", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("retry_override_not_allowed");
+  });
+
+  it("audit: records failed validation without raw payload in summary", async () => {
+    await prisma.user.create({
+      data: {
+        email: "audit-fail@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    const login = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "audit-fail@example.com", password: "pw" }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = cookiePairFromSetCookie(login.headers.get("set-cookie")!);
+    const failReq = "req_audit_validation_fail";
+    const res = await app.request("/api/v1/jobs/example.success/enqueue", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+        "X-Request-Id": failReq,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const row = await prisma.auditLog.findFirst({
+      where: { requestId: failReq, action: "job.enqueue" },
+    });
+    expect(row).not.toBeNull();
+    expect(row?.result).toBe("FAILURE");
+    expect(row?.errorCode).toBe("validation_failed");
+    expect(JSON.stringify(row?.summary)).not.toContain("message");
+  });
+
+  it("audit: admin can list audit logs; viewer cannot", async () => {
+    await prisma.user.create({
+      data: {
+        email: "audit-admin@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "ADMIN",
+      },
+    });
+    await prisma.user.create({
+      data: {
+        email: "audit-view@example.com",
+        passwordHash: await Bun.password.hash("pw", { algorithm: "bcrypt", cost: 4 }),
+        role: "VIEWER",
+      },
+    });
+    const adminLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "audit-admin@example.com", password: "pw" }),
+    });
+    expect(adminLogin.status).toBe(200);
+    const adminCookie = cookiePairFromSetCookie(adminLogin.headers.get("set-cookie")!);
+    const enq = await app.request("/api/v1/jobs/example.success/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: adminCookie, "X-Request-Id": "req_list_audit" },
+      body: JSON.stringify({ message: "aud" }),
+    });
+    expect(enq.status).toBe(200);
+    const list = await app.request("/api/v1/audit-logs?limit=20", {
+      headers: { Cookie: adminCookie },
+    });
+    expect(list.status).toBe(200);
+    const body = (await list.json()) as { items: { action: string }[]; total: number };
+    expect(body.total).toBeGreaterThan(0);
+    expect(body.items.some((i) => i.action === "job.enqueue")).toBe(true);
+
+    const viewLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "audit-view@example.com", password: "pw" }),
+    });
+    expect(viewLogin.status).toBe(200);
+    const viewCookie = cookiePairFromSetCookie(viewLogin.headers.get("set-cookie")!);
+    const denied = await app.request("/api/v1/audit-logs", { headers: { Cookie: viewCookie } });
+    expect(denied.status).toBe(403);
   });
 });

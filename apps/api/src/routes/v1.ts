@@ -8,6 +8,7 @@ import { corsAllowedOrigins } from "../cors";
 import { newApiKeyToken } from "../auth/api-key-crypto";
 import { hasApiKeyScope, isApiKeyJobAllowed } from "../auth/api-key-policy";
 import { applyAuth } from "../auth/resolve-auth";
+import { AUDIT_ACTION, AUDIT_RESULT, recordAudit } from "../audit/audit-log";
 import {
   createBrowserSession,
   DEFAULT_SESSION_MAX_AGE_SEC,
@@ -139,6 +140,70 @@ v1.get("/meta/registered-jobs", async (c) => {
   });
 });
 
+/**
+ * Admin-only, browser session only: paginated audit log (mutations with redacted summaries).
+ * Query: `limit` (1–100), `offset`, `action` (optional exact match)
+ */
+v1.get("/audit-logs", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  if (c.get("apiKey")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  if (user.role !== "ADMIN") {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const sp = c.req.query();
+  const limitRaw = sp.limit != null && sp.limit !== "" ? parseInt(sp.limit, 10) : 50;
+  const limit = Math.min(100, Math.max(1, Number.isNaN(limitRaw) ? 50 : limitRaw));
+  const offsetRaw = sp.offset != null && sp.offset !== "" ? parseInt(sp.offset, 10) : 0;
+  const offset = Math.min(10_000, Math.max(0, Number.isNaN(offsetRaw) ? 0 : offsetRaw));
+  const action = sp.action?.trim() || undefined;
+  const where = action ? { action } : undefined;
+  const [rows, total] = await Promise.all([
+    prisma.auditLog.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: offset,
+      take: limit,
+      select: {
+        id: true,
+        createdAt: true,
+        requestId: true,
+        action: true,
+        summary: true,
+        result: true,
+        errorCode: true,
+        userId: true,
+        apiKeyId: true,
+        user: { select: { email: true } },
+        apiKey: { select: { id: true, name: true } },
+      },
+    }),
+    prisma.auditLog.count({ where }),
+  ]);
+  return c.json({
+    items: rows.map((r) => ({
+      id: r.id,
+      createdAt: r.createdAt.toISOString(),
+      requestId: r.requestId,
+      action: r.action,
+      summary: r.summary,
+      result: r.result,
+      errorCode: r.errorCode,
+      actor: {
+        type: r.apiKeyId ? ("api_key" as const) : ("user" as const),
+        userEmail: r.user.email,
+        apiKeyName: r.apiKey?.name ?? null,
+        apiKeyId: r.apiKeyId,
+      },
+    })),
+    total,
+  });
+});
+
 v1.post("/api-keys", async (c) => {
   const user = c.get("user");
   if (!user) {
@@ -169,6 +234,16 @@ v1.post("/api-keys", async (c) => {
       scopes: body.scopes,
       allowedJobTypes: body.allowedJobTypes,
     },
+  });
+  await recordAudit(c, {
+    action: AUDIT_ACTION.API_KEY_CREATE,
+    summary: {
+      apiKeyId: row.id,
+      name: row.name,
+      scopes: row.scopes,
+      allowedJobTypes: row.allowedJobTypes,
+    },
+    result: AUDIT_RESULT.SUCCESS,
   });
   return c.json(
     {
@@ -230,6 +305,11 @@ v1.delete("/api-keys/:id", async (c) => {
   if (r.count === 0) {
     return c.json({ error: "not_found" as const }, 404);
   }
+  await recordAudit(c, {
+    action: AUDIT_ACTION.API_KEY_REVOKE,
+    summary: { apiKeyId: id },
+    result: AUDIT_RESULT.SUCCESS,
+  });
   return c.body(null, 204);
 });
 
@@ -336,6 +416,12 @@ v1.post("/jobs/:queueName/:jobId/retry", async (c) => {
   }
   const result = await retryFailedJobInPlace(redis, config, queueName, jobId);
   if ("error" in result) {
+    await recordAudit(c, {
+      action: AUDIT_ACTION.JOB_RETRY,
+      summary: { queueName, jobId, jobName: jn ?? null },
+      result: AUDIT_RESULT.FAILURE,
+      errorCode: result.error,
+    });
     if (result.error === "job_not_found") {
       return c.json({ error: "job_not_found" }, 404);
     }
@@ -344,6 +430,11 @@ v1.post("/jobs/:queueName/:jobId/retry", async (c) => {
     }
     return c.json({ error: "invalid_state" }, 400);
   }
+  await recordAudit(c, {
+    action: AUDIT_ACTION.JOB_RETRY,
+    summary: { queueName, jobId, jobName: jn ?? null },
+    result: AUDIT_RESULT.SUCCESS,
+  });
   return c.json({ ok: true as const });
 });
 
@@ -393,6 +484,12 @@ v1.post("/jobs/:queueName/:jobId/retry-as-new", async (c) => {
       user: { id: user.id, role: user.role },
     });
     if ("error" in result) {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_RETRY_AS_NEW,
+        summary: { sourceQueueName: queueName, sourceJobId: jobId, jobName: jn0 ?? null },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: result.error,
+      });
       if (result.error === "job_not_found") {
         return c.json({ error: "job_not_found" as const }, 404);
       }
@@ -404,26 +501,73 @@ v1.post("/jobs/:queueName/:jobId/retry-as-new", async (c) => {
       }
       return c.json({ error: "invalid_state" as const }, 400);
     }
+    await recordAudit(c, {
+      action: AUDIT_ACTION.JOB_RETRY_AS_NEW,
+      summary: {
+        sourceQueueName: queueName,
+        sourceJobId: jobId,
+        newJobId: result.jobId,
+        queueName: result.queueName,
+        jobName: jn0 ?? null,
+      },
+      result: AUDIT_RESULT.SUCCESS,
+    });
     return c.json({ ...result, requestId });
   } catch (err) {
     if (err instanceof ZodError || isZodIssuesError(err)) {
       const issues = err instanceof ZodError ? err.issues : (err as { issues: unknown }).issues;
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_RETRY_AS_NEW,
+        summary: { sourceQueueName: queueName, sourceJobId: jobId, jobName: jn0 ?? null },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "validation_failed",
+      });
       return c.json({ error: "validation_failed" as const, issues }, 400);
     }
     const code = (err as { code?: string }).code;
     if (code === "invalid_body") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_RETRY_AS_NEW,
+        summary: { sourceQueueName: queueName, sourceJobId: jobId, jobName: jn0 ?? null },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "invalid_json",
+      });
       return c.json({ error: "invalid_json" as const }, 400);
     }
     if (code === "retry_override_not_allowed") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_RETRY_AS_NEW,
+        summary: { sourceQueueName: queueName, sourceJobId: jobId, jobName: jn0 ?? null },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "retry_override_not_allowed",
+      });
       return c.json({ error: "retry_override_not_allowed" as const }, 400);
     }
     if (code === "retry_override_invalid") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_RETRY_AS_NEW,
+        summary: { sourceQueueName: queueName, sourceJobId: jobId, jobName: jn0 ?? null },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "retry_override_invalid",
+      });
       return c.json({ error: "retry_override_invalid" as const }, 400);
     }
     if (code === "retry_override_out_of_range") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_RETRY_AS_NEW,
+        summary: { sourceQueueName: queueName, sourceJobId: jobId, jobName: jn0 ?? null },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "retry_override_out_of_range",
+      });
       return c.json({ error: "retry_override_out_of_range" as const }, 400);
     }
     if (code === "retry_with_non_object_payload") {
+      await recordAudit(c, {
+        action: AUDIT_ACTION.JOB_RETRY_AS_NEW,
+        summary: { sourceQueueName: queueName, sourceJobId: jobId, jobName: jn0 ?? null },
+        result: AUDIT_RESULT.FAILURE,
+        errorCode: "retry_with_non_object_payload",
+      });
       return c.json({ error: "retry_with_non_object_payload" as const }, 400);
     }
     throw err;
@@ -450,6 +594,12 @@ v1.delete("/jobs/:queueName/:jobId", async (c) => {
   }
   const result = await removeFailedJob(redis, config, queueName, jobId);
   if ("error" in result) {
+    await recordAudit(c, {
+      action: AUDIT_ACTION.JOB_REMOVE,
+      summary: { queueName, jobId, jobName: jn ?? null },
+      result: AUDIT_RESULT.FAILURE,
+      errorCode: result.error,
+    });
     if (result.error === "job_not_found") {
       return c.json({ error: "job_not_found" }, 404);
     }
@@ -458,6 +608,11 @@ v1.delete("/jobs/:queueName/:jobId", async (c) => {
     }
     return c.json({ error: "invalid_state" }, 400);
   }
+  await recordAudit(c, {
+    action: AUDIT_ACTION.JOB_REMOVE,
+    summary: { queueName, jobId, jobName: jn ?? null },
+    result: AUDIT_RESULT.SUCCESS,
+  });
   return c.body(null, 204);
 });
 
