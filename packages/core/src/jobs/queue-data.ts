@@ -13,6 +13,10 @@ export const queueJobDataSchema = z.object({
       role: z.string(),
     })
     .optional(),
+  /** How the run was enqueued; omitted on legacy jobs. */
+  source: z.enum(["api", "ui", "schedule", "system"]).optional(),
+  /** Stable JobSchedule id when `source` is `schedule`. */
+  scheduleId: z.string().min(1).optional(),
   /** Set when an admin enqueues a replacement job from a failed job (DLQ recovery). */
   retriedAsNewFrom: z
     .object({

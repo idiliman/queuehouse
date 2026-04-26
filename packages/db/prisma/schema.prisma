@@ -82,3 +82,23 @@ model AuditLog {
   @@index([userId, createdAt(sort: Desc)])
   @@index([action])
 }
+
+/**
+ * Postgres-backed cron schedule; BullMQ JobScheduler id matches `id` for upsert/reconcile.
+ */
+model JobSchedule {
+  id            String   @id @default(cuid())
+  jobName       String
+  cronPattern   String
+  timeZone      String
+  payload       Json
+  enabled       Boolean  @default(true)
+  /// Omit to use job registry defaults; lower = higher priority in BullMQ.
+  priority      Int?
+  /// Optional { maxAttempts?, backoffMs? } — merged with registry bounds like manual enqueue.
+  retryOverride Json?
+  /// Job definition schemaVersion at save time (for future mismatch checks; issue #15).
+  schemaVersion Int      @default(1)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}

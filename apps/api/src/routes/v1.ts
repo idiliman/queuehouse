@@ -2,12 +2,15 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z, ZodError } from "zod";
 import {
+  getRegisteredJob,
   JOB_CAPABILITY,
   listRegisteredJobs,
   MANUAL_ENQUEUE_LIMITS,
   mergePayloadWithRetryForEnqueue,
   resolveManualEnqueueDelayMs,
+  splitJobEnqueueBody,
 } from "@queuehouse/core";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@queuehouse/db";
 import { config } from "../config";
 import { corsAllowedOrigins } from "../cors";
@@ -30,7 +33,13 @@ import {
   retryFailedJobAsNew,
   retryFailedJobInPlace,
 } from "../bullmq/queuehouse-queue";
+import {
+  getNextRunForSchedule,
+  removeJobScheduleFromBull,
+  syncJobScheduleToBull,
+} from "../bullmq/job-schedules";
 import { getQueuehouseRedis } from "../bullmq/redis";
+import { assertValidIanaTimeZone, previewCronRuns } from "../schedules/cron-preview";
 import { createApiDocsApp } from "../openapi/api-docs";
 
 export type { ApiVariables };
@@ -44,7 +53,7 @@ if (allowedOrigins.length > 0) {
     "/*",
     cors({
       origin: allowedOrigins,
-      allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+      allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "X-Request-Id", "Authorization"],
       credentials: true,
     }),
@@ -147,6 +156,7 @@ v1.get("/meta/registered-jobs", async (c) => {
       name: j.name,
       description: j.description,
       manualUi: j.capabilities.includes(JOB_CAPABILITY.MANUAL_UI),
+      schedulable: j.capabilities.includes(JOB_CAPABILITY.SCHEDULABLE),
     })),
   });
 });
@@ -875,6 +885,396 @@ v1.delete("/jobs/:queueName/:jobId", async (c) => {
   await recordAudit(c, {
     action: AUDIT_ACTION.JOB_REMOVE,
     summary: { queueName, jobId, jobName: jn ?? null },
+    result: AUDIT_RESULT.SUCCESS,
+  });
+  return c.body(null, 204);
+});
+
+const scheduleCreateBody = z
+  .object({
+    jobName: z.string().min(1).max(200),
+    cronPattern: z.string().min(1).max(200),
+    timeZone: z.string().min(1).max(100),
+    payload: z.unknown(),
+    enabled: z.boolean().optional().default(true),
+    priority: z.number().int().min(0).max(2_097_152).optional(),
+    retry: z
+      .object({
+        maxAttempts: z.number().int().optional(),
+        backoffMs: z.number().int().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const schedulePatchBody = z
+  .object({
+    jobName: z.string().min(1).max(200).optional(),
+    cronPattern: z.string().min(1).max(200).optional(),
+    timeZone: z.string().min(1).max(100).optional(),
+    payload: z.unknown().optional(),
+    enabled: z.boolean().optional(),
+    priority: z.number().int().min(0).max(2_097_152).nullable().optional(),
+    retry: z
+      .object({
+        maxAttempts: z.number().int().optional(),
+        backoffMs: z.number().int().optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
+  })
+  .strict();
+
+const schedulePreviewBody = z
+  .object({
+    cronPattern: z.string().min(1).max(200),
+    timeZone: z.string().min(1).max(100),
+    count: z.number().int().min(1).max(20).optional().default(5),
+  })
+  .strict();
+
+function adminSessionOnly(c: { get: (key: string) => unknown }): boolean {
+  const user = c.get("user");
+  if (!user || c.get("apiKey")) return false;
+  return (user as { role: string }).role === "ADMIN";
+}
+
+v1.post("/schedules/preview", async (c) => {
+  if (!adminSessionOnly(c)) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  let body: z.infer<typeof schedulePreviewBody>;
+  try {
+    body = schedulePreviewBody.parse(await c.req.json());
+  } catch {
+    return c.json({ error: "validation_failed" as const }, 400);
+  }
+  try {
+    assertValidIanaTimeZone(body.timeZone);
+  } catch {
+    return c.json({ error: "invalid_time_zone" as const }, 400);
+  }
+  try {
+    const runs = previewCronRuns(body.cronPattern, body.timeZone, body.count);
+    return c.json({ runs });
+  } catch {
+    return c.json({ error: "invalid_cron" as const }, 400);
+  }
+});
+
+v1.get("/schedules", async (c) => {
+  if (!adminSessionOnly(c)) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  const rows = await prisma.jobSchedule.findMany({ orderBy: { updatedAt: "desc" } });
+  const redis = getQueuehouseRedis(config);
+  const schedules = await Promise.all(
+    rows.map(async (r) => {
+      const nextRunMs = r.enabled
+        ? await getNextRunForSchedule(redis, config, r.jobName, r.id)
+        : null;
+      return {
+        id: r.id,
+        jobName: r.jobName,
+        cronPattern: r.cronPattern,
+        timeZone: r.timeZone,
+        payload: r.payload,
+        enabled: r.enabled,
+        priority: r.priority,
+        retryOverride: r.retryOverride,
+        schemaVersion: r.schemaVersion,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+        nextRunMs,
+        nextRun: nextRunMs != null ? new Date(nextRunMs).toISOString() : null,
+      };
+    }),
+  );
+  return c.json({ schedules });
+});
+
+v1.post("/schedules", async (c) => {
+  if (!adminSessionOnly(c)) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  let body: z.infer<typeof scheduleCreateBody>;
+  try {
+    body = scheduleCreateBody.parse(await c.req.json());
+  } catch {
+    return c.json({ error: "validation_failed" as const }, 400);
+  }
+  try {
+    assertValidIanaTimeZone(body.timeZone);
+  } catch {
+    return c.json({ error: "invalid_time_zone" as const }, 400);
+  }
+  const reg = getRegisteredJob(body.jobName);
+  if (!reg) {
+    return c.json({ error: "unknown_job" as const }, 400);
+  }
+  if (!reg.capabilities.includes(JOB_CAPABILITY.SCHEDULABLE)) {
+    return c.json({ error: "job_not_schedulable" as const }, 400);
+  }
+  try {
+    const merged = mergePayloadWithRetryForEnqueue(body.payload, body.retry);
+    const { payload: parsedPayload } = splitJobEnqueueBody(reg, merged);
+    reg.inputSchema.parse(parsedPayload);
+  } catch (err) {
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    const code = (err as { code?: string }).code;
+    if (code === "retry_with_non_object_payload") {
+      return c.json({ error: "retry_with_non_object_payload" as const }, 400);
+    }
+    if (
+      code === "retry_override_not_allowed" ||
+      code === "retry_override_invalid" ||
+      code === "retry_override_out_of_range"
+    ) {
+      return c.json({ error: code as "retry_override_not_allowed" }, 400);
+    }
+    throw err;
+  }
+  const redis = getQueuehouseRedis(config);
+  const created = await prisma.jobSchedule.create({
+    data: {
+      jobName: body.jobName,
+      cronPattern: body.cronPattern,
+      timeZone: body.timeZone,
+      payload: body.payload as Prisma.InputJsonValue,
+      enabled: body.enabled,
+      priority: body.priority ?? null,
+      retryOverride: body.retry === undefined ? undefined : (body.retry as Prisma.InputJsonValue),
+      schemaVersion: reg.schemaVersion,
+    },
+  });
+  try {
+    await syncJobScheduleToBull(redis, config, created);
+  } catch (err) {
+    await prisma.jobSchedule.delete({ where: { id: created.id } });
+    const code = (err as { code?: string }).code;
+    if (code === "unknown_job" || code === "job_not_schedulable") {
+      return c.json({ error: (code ?? "unknown_job") as "unknown_job" | "job_not_schedulable" }, 400);
+    }
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    if (code === "retry_with_non_object_payload") {
+      return c.json({ error: "retry_with_non_object_payload" as const }, 400);
+    }
+    if (
+      code === "retry_override_not_allowed" ||
+      code === "retry_override_invalid" ||
+      code === "retry_override_out_of_range"
+    ) {
+      return c.json({ error: code as "retry_override_not_allowed" }, 400);
+    }
+    throw err;
+  }
+  await recordAudit(c, {
+    action: AUDIT_ACTION.SCHEDULE_CREATE,
+    summary: { scheduleId: created.id, jobName: created.jobName },
+    result: AUDIT_RESULT.SUCCESS,
+  });
+  return c.json({
+    schedule: {
+      id: created.id,
+      jobName: created.jobName,
+      cronPattern: created.cronPattern,
+      timeZone: created.timeZone,
+      payload: created.payload,
+      enabled: created.enabled,
+      priority: created.priority,
+      retryOverride: created.retryOverride,
+      schemaVersion: created.schemaVersion,
+      createdAt: created.createdAt.toISOString(),
+      updatedAt: created.updatedAt.toISOString(),
+    },
+  });
+});
+
+v1.patch("/schedules/:id", async (c) => {
+  if (!adminSessionOnly(c)) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  const id = c.req.param("id");
+  let body: z.infer<typeof schedulePatchBody>;
+  try {
+    body = schedulePatchBody.parse(await c.req.json());
+  } catch {
+    return c.json({ error: "validation_failed" as const }, 400);
+  }
+  const before = await prisma.jobSchedule.findUnique({ where: { id } });
+  if (!before) {
+    return c.json({ error: "not_found" as const }, 404);
+  }
+  if (body.timeZone) {
+    try {
+      assertValidIanaTimeZone(body.timeZone);
+    } catch {
+      return c.json({ error: "invalid_time_zone" as const }, 400);
+    }
+  }
+  const nextJobName = body.jobName ?? before.jobName;
+  const reg = getRegisteredJob(nextJobName);
+  if (!reg) {
+    return c.json({ error: "unknown_job" as const }, 400);
+  }
+  if (!reg.capabilities.includes(JOB_CAPABILITY.SCHEDULABLE)) {
+    return c.json({ error: "job_not_schedulable" as const }, 400);
+  }
+  const nextPayload = body.payload !== undefined ? body.payload : before.payload;
+  const nextRetryRaw = body.retry !== undefined ? body.retry : before.retryOverride;
+  const nextRetry = nextRetryRaw === null ? undefined : nextRetryRaw;
+  try {
+    const merged = mergePayloadWithRetryForEnqueue(nextPayload, nextRetry);
+    const { payload: parsedPayload } = splitJobEnqueueBody(reg, merged);
+    reg.inputSchema.parse(parsedPayload);
+  } catch (err) {
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    const code = (err as { code?: string }).code;
+    if (code === "retry_with_non_object_payload") {
+      return c.json({ error: "retry_with_non_object_payload" as const }, 400);
+    }
+    if (
+      code === "retry_override_not_allowed" ||
+      code === "retry_override_invalid" ||
+      code === "retry_override_out_of_range"
+    ) {
+      return c.json({ error: code as "retry_override_not_allowed" }, 400);
+    }
+    throw err;
+  }
+  const redis = getQueuehouseRedis(config);
+  const reassignJob =
+    body.jobName !== undefined && body.jobName !== before.jobName;
+  if (reassignJob) {
+    await removeJobScheduleFromBull(redis, config, before.jobName, id);
+  }
+  const patchData: Prisma.JobScheduleUpdateInput = {};
+  if (body.jobName !== undefined) {
+    patchData.jobName = body.jobName;
+    patchData.schemaVersion = reg.schemaVersion;
+  }
+  if (body.cronPattern !== undefined) {
+    patchData.cronPattern = body.cronPattern;
+  }
+  if (body.timeZone !== undefined) {
+    patchData.timeZone = body.timeZone;
+  }
+  if (body.payload !== undefined) {
+    patchData.payload = body.payload as Prisma.InputJsonValue;
+  }
+  if (body.enabled !== undefined) {
+    patchData.enabled = body.enabled;
+  }
+  if (body.priority !== undefined) {
+    patchData.priority = body.priority;
+  }
+  if (body.retry !== undefined) {
+    patchData.retryOverride =
+      body.retry === null ? Prisma.DbNull : (body.retry as Prisma.InputJsonValue);
+  }
+  let didUpdate = false;
+  try {
+    const updated = await prisma.jobSchedule.update({
+      where: { id },
+      data: patchData,
+    });
+    didUpdate = true;
+    await syncJobScheduleToBull(redis, config, updated);
+  } catch (err) {
+    if (didUpdate) {
+      try {
+        await prisma.jobSchedule.update({
+          where: { id },
+          data: {
+            jobName: before.jobName,
+            cronPattern: before.cronPattern,
+            timeZone: before.timeZone,
+            payload: before.payload as Prisma.InputJsonValue,
+            enabled: before.enabled,
+            priority: before.priority,
+            retryOverride:
+              before.retryOverride === null
+                ? Prisma.DbNull
+                : (before.retryOverride as Prisma.InputJsonValue),
+            schemaVersion: before.schemaVersion,
+          },
+        });
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (reassignJob) {
+      try {
+        await syncJobScheduleToBull(redis, config, before);
+      } catch {
+        /* best-effort restore Bull state */
+      }
+    }
+    const code = (err as { code?: string }).code;
+    if (code === "unknown_job" || code === "job_not_schedulable") {
+      return c.json({ error: (code ?? "unknown_job") as "unknown_job" | "job_not_schedulable" }, 400);
+    }
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_failed" as const, issues: err.issues }, 400);
+    }
+    if (code === "retry_with_non_object_payload") {
+      return c.json({ error: "retry_with_non_object_payload" as const }, 400);
+    }
+    if (
+      code === "retry_override_not_allowed" ||
+      code === "retry_override_invalid" ||
+      code === "retry_override_out_of_range"
+    ) {
+      return c.json({ error: code as "retry_override_not_allowed" }, 400);
+    }
+    throw err;
+  }
+  await recordAudit(c, {
+    action: AUDIT_ACTION.SCHEDULE_UPDATE,
+    summary: { scheduleId: id, jobName: nextJobName },
+    result: AUDIT_RESULT.SUCCESS,
+  });
+  const after = await prisma.jobSchedule.findUniqueOrThrow({ where: { id } });
+  return c.json({
+    schedule: {
+      id: after.id,
+      jobName: after.jobName,
+      cronPattern: after.cronPattern,
+      timeZone: after.timeZone,
+      payload: after.payload,
+      enabled: after.enabled,
+      priority: after.priority,
+      retryOverride: after.retryOverride,
+      schemaVersion: after.schemaVersion,
+      createdAt: after.createdAt.toISOString(),
+      updatedAt: after.updatedAt.toISOString(),
+    },
+  });
+});
+
+v1.delete("/schedules/:id", async (c) => {
+  if (!adminSessionOnly(c)) {
+    return c.json({ error: "forbidden" as const }, 403);
+  }
+  const id = c.req.param("id");
+  const row = await prisma.jobSchedule.findUnique({ where: { id } });
+  if (!row) {
+    return c.json({ error: "not_found" as const }, 404);
+  }
+  const redis = getQueuehouseRedis(config);
+  await removeJobScheduleFromBull(redis, config, row.jobName, id);
+  await prisma.jobSchedule.delete({ where: { id } });
+  await recordAudit(c, {
+    action: AUDIT_ACTION.SCHEDULE_DELETE,
+    summary: { scheduleId: id, jobName: row.jobName },
     result: AUDIT_RESULT.SUCCESS,
   });
   return c.body(null, 204);

@@ -8,6 +8,7 @@ import {
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { ApiKeysPage } from "./operator/ApiKeysPage";
 import { ManualEnqueuePage } from "./operator/ManualEnqueuePage";
+import { SchedulesPage } from "./operator/SchedulesPage";
 import { AuditLogPage } from "./operator/AuditLogPage";
 import { JobDetailPage } from "./operator/JobDetailPage";
 import { JobsTablePage } from "./operator/JobsTablePage";
@@ -110,6 +111,9 @@ export function App() {
               <>
                 <Link to="/enqueue" style={navStyle}>
                   Enqueue
+                </Link>
+                <Link to="/schedules" style={navStyle}>
+                  Schedules
                 </Link>
                 <Link to="/api-keys" style={navStyle}>
                   API keys
@@ -218,6 +222,18 @@ export function App() {
             user?.role === "ADMIN" ? (
               <section style={{ marginTop: "1.5rem" }}>
                 <ManualEnqueuePage />
+              </section>
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
+        <Route
+          path="/schedules"
+          element={
+            user?.role === "ADMIN" ? (
+              <section style={{ marginTop: "1.5rem" }}>
+                <SchedulesPage />
               </section>
             ) : (
               <Navigate to="/" replace />

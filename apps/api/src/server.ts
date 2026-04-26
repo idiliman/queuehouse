@@ -51,4 +51,7 @@ if (import.meta.main) {
     `Queuehouse API [${config.namespace}] listening on http://localhost:${port}`,
   );
   Bun.serve({ port, fetch: app.fetch });
+  void import("./schedules/startup")
+    .then((m) => m.runScheduleStartupReconciliation())
+    .catch((e) => console.error("[schedules] startup reconcile failed:", e));
 }

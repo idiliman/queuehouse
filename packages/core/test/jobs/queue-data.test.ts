@@ -30,6 +30,17 @@ describe("runJobFromQueueData", () => {
     expect(out).toEqual({ echoed: "hello" });
   });
 
+  it("accepts schedule-sourced run metadata on the envelope", () => {
+    const out = runJobFromQueueData({
+      jobName: exampleSuccessJob.name,
+      payload: { message: "hi" },
+      requestId: "schedule:clxyz",
+      source: "schedule",
+      scheduleId: "clxyz",
+    });
+    expect(out).toEqual({ echoed: "hi" });
+  });
+
   it("rejects unknown job names", () => {
     expect(() =>
       runJobFromQueueData({

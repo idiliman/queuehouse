@@ -10,6 +10,9 @@ export const AUDIT_ACTION = {
   JOB_REMOVE: "job.remove",
   API_KEY_CREATE: "api_key.create",
   API_KEY_REVOKE: "api_key.revoke",
+  SCHEDULE_CREATE: "schedule.create",
+  SCHEDULE_UPDATE: "schedule.update",
+  SCHEDULE_DELETE: "schedule.delete",
 } as const;
 
 export const AUDIT_RESULT = {

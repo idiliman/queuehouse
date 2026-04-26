@@ -14,6 +14,7 @@ export const exampleSuccessJob = defineJob({
     JOB_CAPABILITY.ENQUEUE_API,
     JOB_CAPABILITY.ENQUEUE_INTERNAL,
     JOB_CAPABILITY.MANUAL_UI,
+    JOB_CAPABILITY.SCHEDULABLE,
   ],
   input: z.object({
     message: z.string().min(1).max(4096),

@@ -18,6 +18,7 @@
         "@queuehouse/db": "workspace:*",
         "@scalar/hono-api-reference": "^0.10.10",
         "bullmq": "^5.40.0",
+        "cron-parser": "^4.9.0",
         "hono": "^4.7.4",
         "ioredis": "^5.6.0",
         "zod": "3.24.0",
