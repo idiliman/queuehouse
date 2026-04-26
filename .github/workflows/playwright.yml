@@ -1,0 +1,69 @@
+name: Playwright
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: queuehouse
+          POSTGRES_PASSWORD: queuehouse
+          POSTGRES_DB: queuehouse
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U queuehouse -d queuehouse"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CI: "1"
+      DATABASE_URL: postgresql://queuehouse:queuehouse@localhost:5432/queuehouse
+      REDIS_URL: redis://localhost:6379
+      SESSION_SECRET: local-dev-session-secret-change-me
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.6
+
+      - run: bun install
+
+      - run: bunx playwright install chromium --with-deps
+        working-directory: apps/web
+
+      - name: Start worker (background)
+        run: |
+          cd apps/worker
+          bun run src/worker.ts &
+          echo $! > /tmp/queuehouse-worker.pid
+          sleep 3
+
+      - run: bun run test:e2e:ci
+        working-directory: apps/web
+
+      - name: Stop worker
+        if: always()
+        run: |
+          if [ -f /tmp/queuehouse-worker.pid ]; then
+            kill "$(cat /tmp/queuehouse-worker.pid)" 2>/dev/null || true
+          fi
