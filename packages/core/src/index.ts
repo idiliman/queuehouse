@@ -12,6 +12,12 @@ export {
 } from "./config";
 
 export {
+  structuredLog,
+  type QueuehouseServiceName,
+  type StructuredLogLevel,
+} from "./structured-log";
+
+export {
   JOB_CAPABILITY,
   JobUnrecoverableError,
   bullmqPrefix,

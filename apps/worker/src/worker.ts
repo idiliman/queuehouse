@@ -7,6 +7,7 @@ import {
   loadConfig,
   QUEUEHOUSE_VERSION,
   runJobFromQueueData,
+  structuredLog,
   WORKER_HEARTBEAT_REFRESH_MS,
   WORKER_HEARTBEAT_TTL_SEC,
   workerHeartbeatRedisKey,
@@ -45,9 +46,11 @@ const workers = uniqueQueues.map(
     ),
 );
 
-console.log(
-  `[queuehouse-worker] [${config.namespace}] listening on queues: ${uniqueQueues.join(", ")} (core ${QUEUEHOUSE_VERSION}, bull prefix "${prefix}")`,
-);
+structuredLog(config, "queuehouse-worker", "info", "worker started", {
+  queues: uniqueQueues,
+  coreVersion: QUEUEHOUSE_VERSION,
+  bullPrefix: prefix,
+});
 
 if (import.meta.main) {
   const instanceId = randomUUID();
@@ -70,10 +73,9 @@ if (import.meta.main) {
   await publishHeartbeat();
   const hbInterval = setInterval(() => {
     void publishHeartbeat().catch((err) => {
-      console.error(
-        "[queuehouse-worker] heartbeat failed",
-        err instanceof Error ? err.message : err,
-      );
+      structuredLog(config, "queuehouse-worker", "error", "heartbeat failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
   }, WORKER_HEARTBEAT_REFRESH_MS);
 
@@ -86,9 +88,10 @@ if (import.meta.main) {
     }
     isShuttingDown = true;
     clearInterval(hbInterval);
-    console.log(
-      `[queuehouse-worker] ${signal} received, pausing and closing workers (grace ${graceMs}ms)…`,
-    );
+    structuredLog(config, "queuehouse-worker", "info", "shutdown: signal received", {
+      signal,
+      graceMs,
+    });
     try {
       await connection.del(heartbeatKey);
     } catch {
@@ -98,15 +101,14 @@ if (import.meta.main) {
       await bullmqWorkerGracefulShutdown(workers, {
         graceMs,
         onLog: (line) => {
-          console.log(line);
+          structuredLog(config, "queuehouse-worker", "info", line);
         },
         cancelReason: `signal:${signal}`,
       });
     } catch (err) {
-      console.error(
-        "[queuehouse-worker] error during worker shutdown",
-        err instanceof Error ? err.message : err,
-      );
+      structuredLog(config, "queuehouse-worker", "error", "error during worker shutdown", {
+        error: err instanceof Error ? err.message : String(err),
+      });
       try {
         await connection.quit();
       } catch {
@@ -117,10 +119,9 @@ if (import.meta.main) {
     try {
       await connection.quit();
     } catch (err) {
-      console.error(
-        "[queuehouse-worker] error closing Redis",
-        err instanceof Error ? err.message : err,
-      );
+      structuredLog(config, "queuehouse-worker", "error", "error closing Redis", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     process.exit(0);
   }
