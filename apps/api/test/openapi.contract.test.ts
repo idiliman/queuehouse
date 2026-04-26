@@ -1,3 +1,4 @@
+import "./test-setup";
 import { describe, expect, it } from "bun:test";
 import { getOpenApiDocumentForTests } from "../src/openapi/api-docs";
 

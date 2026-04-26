@@ -10,6 +10,8 @@ import {
   resolveSessionUser,
 } from "../auth/session";
 import type { ApiVariables } from "../api-types";
+import { getJobDetail } from "../bullmq/queuehouse-queue";
+import { getQueuehouseRedis } from "../bullmq/redis";
 import { createApiDocsApp } from "../openapi/api-docs";
 
 export type { ApiVariables };
@@ -98,4 +100,22 @@ v1.get("/protected/admin", async (c) => {
   return c.json({ ok: true, role: user.role });
 });
 
-v1.route("/", createApiDocsApp());
+/**
+ * BullMQ job status. `queueName` disambiguates job ids (ids are only unique per queue).
+ */
+v1.get("/jobs/:queueName/:jobId", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ error: "unauthenticated" }, 401);
+  }
+  const queueName = c.req.param("queueName");
+  const jobId = c.req.param("jobId");
+  const redis = getQueuehouseRedis(config);
+  const detail = await getJobDetail(redis, config, queueName, jobId);
+  if (!detail) {
+    return c.json({ error: "job_not_found" }, 404);
+  }
+  return c.json(detail);
+});
+
+v1.route("/", createApiDocsApp(config));

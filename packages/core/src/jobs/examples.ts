@@ -2,7 +2,8 @@ import { z } from "zod";
 import { defineJob } from "./defineJob";
 import { JOB_CAPABILITY } from "./types";
 
-const exampleQueue = "queuehouse:example";
+/** BullMQ disallows `:` in queue names; use a safe delimiter. */
+const exampleQueue = "queuehouse-example";
 
 /** Echoes input — happy-path reference job. */
 export const exampleSuccessJob = defineJob({

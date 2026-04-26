@@ -1,12 +1,17 @@
 import "./zod-patch";
 import { Scalar } from "@scalar/hono-api-reference";
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
-import { JOB_CAPABILITY, listRegisteredJobs } from "@queuehouse/core";
+import { ZodError } from "zod";
+import {
+  EXAMPLE_DATABASE_URL,
+  JOB_CAPABILITY,
+  listRegisteredJobs,
+  loadConfig,
+  type QueuehouseConfig,
+} from "@queuehouse/core";
 import type { ApiVariables } from "../api-types";
-
-const enqueueNotImplemented = z.object({
-  error: z.literal("enqueue_not_implemented"),
-});
+import { enqueueAuthenticatedJob } from "../bullmq/queuehouse-queue";
+import { getQueuehouseRedis } from "../bullmq/redis";
 
 function hasEnqueueApi(job: { capabilities: readonly string[] }): boolean {
   return job.capabilities.includes(JOB_CAPABILITY.ENQUEUE_API);
@@ -19,16 +24,57 @@ const genericEnqueueBody = z.object({
     .describe("Registered job name, e.g. `example.success`."),
   payload: z
     .unknown()
-    .describe(
-      "JSON payload; must match the target job input schema (validated when enqueue is implemented).",
-    ),
+    .describe("JSON payload; must match the target job input schema."),
 });
 
+const enqueueAccepted = z.object({
+  jobId: z.string(),
+  queueName: z.string(),
+  requestId: z.string(),
+});
+
+const enqueueClientError = z.object({
+  error: z.enum([
+    "unknown_job",
+    "enqueue_not_allowed",
+    "validation_failed",
+    "invalid_json",
+  ]),
+  issues: z.unknown().optional(),
+});
+
+function isZodIssuesError(err: unknown): err is { issues: unknown } {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "issues" in err &&
+    Array.isArray((err as { issues: unknown }).issues)
+  );
+}
+
+async function readEnqueueJsonBody(c: {
+  req: {
+    valid: (k: "json") => unknown;
+    json: () => Promise<unknown>;
+  };
+}): Promise<{ body: unknown } | { error: "invalid_json" }> {
+  const validated = c.req.valid("json");
+  if (validated !== undefined) {
+    return { body: validated };
+  }
+  try {
+    return { body: await c.req.json() };
+  } catch {
+    return { error: "invalid_json" };
+  }
+}
+
 /**
- * Hono sub-app: protected OpenAPI document, Scalar UI, and documented enqueue
- * stub routes (BullMQ wiring lands in a later issue).
+ * Hono sub-app: protected OpenAPI document, Scalar UI, and typed enqueue routes.
  */
-export function createApiDocsApp(): OpenAPIHono<{ Variables: ApiVariables }> {
+export function createApiDocsApp(
+  cfg: QueuehouseConfig,
+): OpenAPIHono<{ Variables: ApiVariables }> {
   const app = new OpenAPIHono<{ Variables: ApiVariables }>();
 
   app.use("*", async (c, next) => {
@@ -51,7 +97,6 @@ export function createApiDocsApp(): OpenAPIHono<{ Variables: ApiVariables }> {
         body: {
           content: {
             "application/json": {
-              // Registered at runtime after `extendZodWithOpenApi(z)`; TS cannot see the mixin.
               schema: job.inputSchema as unknown as import("zod").ZodType<
                 unknown,
                 import("zod").ZodTypeDef,
@@ -65,16 +110,60 @@ export function createApiDocsApp(): OpenAPIHono<{ Variables: ApiVariables }> {
       tags: job.deprecated ? ["enqueue", "deprecated"] : ["enqueue"],
       deprecated: job.deprecated === true,
       responses: {
-        501: {
-          description:
-            "Enqueue is not yet wired to BullMQ; reserved response shape for the next milestone.",
-          content: { "application/json": { schema: enqueueNotImplemented } },
+        200: {
+          description: "Job enqueued",
+          content: { "application/json": { schema: enqueueAccepted } },
+        },
+        400: {
+          description: "Invalid payload or unknown job",
+          content: { "application/json": { schema: enqueueClientError } },
+        },
+        403: {
+          description: "Job is not allowed for public API enqueue",
+          content: { "application/json": { schema: enqueueClientError } },
+        },
+        401: {
+          description: "Unauthenticated",
+          content: {
+            "application/json": {
+              schema: z.object({ error: z.literal("unauthenticated") }),
+            },
+          },
         },
       },
     });
-    app.openapi(route, (c) =>
-      c.json({ error: "enqueue_not_implemented" } as const, 501),
-    );
+    app.openapi(route, async (c) => {
+      const user = c.get("user")!;
+      const parsed = await readEnqueueJsonBody(c);
+      if ("error" in parsed) {
+        return c.json({ error: "invalid_json" as const }, 400);
+      }
+      const body = parsed.body;
+      const requestId = c.get("requestId")!;
+      const redis = getQueuehouseRedis(cfg);
+      try {
+        const { jobId, queueName } = await enqueueAuthenticatedJob(redis, cfg, {
+          jobName: job.name,
+          payload: body,
+          requestId,
+          user: { id: user.id, role: user.role },
+        });
+        return c.json({ jobId, queueName, requestId }, 200);
+      } catch (err) {
+        if (err instanceof ZodError || isZodIssuesError(err)) {
+          const issues = err instanceof ZodError ? err.issues : (err as { issues: unknown }).issues;
+          return c.json({ error: "validation_failed" as const, issues }, 400);
+        }
+        const code = (err as { code?: string }).code;
+        if (code === "unknown_job") {
+          return c.json({ error: "unknown_job" as const }, 400);
+        }
+        if (code === "enqueue_not_allowed") {
+          return c.json({ error: "enqueue_not_allowed" as const }, 403);
+        }
+        throw err;
+      }
+    });
   }
 
   const genericRoute = createRoute({
@@ -92,15 +181,64 @@ export function createApiDocsApp(): OpenAPIHono<{ Variables: ApiVariables }> {
     },
     tags: ["enqueue", "tooling"],
     responses: {
-      501: {
-        description: "Same stub as per-job paths until the worker slice lands.",
-        content: { "application/json": { schema: enqueueNotImplemented } },
+      200: {
+        description: "Job enqueued",
+        content: { "application/json": { schema: enqueueAccepted } },
+      },
+      400: {
+        description: "Invalid payload or unknown job",
+        content: { "application/json": { schema: enqueueClientError } },
+      },
+      403: {
+        description: "Job is not allowed for public API enqueue",
+        content: { "application/json": { schema: enqueueClientError } },
+      },
+      401: {
+        description: "Unauthenticated",
+        content: {
+          "application/json": {
+            schema: z.object({ error: z.literal("unauthenticated") }),
+          },
+        },
       },
     },
   });
-  app.openapi(genericRoute, (c) =>
-    c.json({ error: "enqueue_not_implemented" } as const, 501),
-  );
+  app.openapi(genericRoute, async (c) => {
+    const user = c.get("user")!;
+    const parsed = await readEnqueueJsonBody(c);
+    if ("error" in parsed) {
+      return c.json({ error: "invalid_json" as const }, 400);
+    }
+    const envelope = parsed.body as { jobName?: string; payload?: unknown };
+    const jobName = typeof envelope?.jobName === "string" ? envelope.jobName : "";
+    if (!jobName) {
+      return c.json({ error: "validation_failed" as const, issues: [{ message: "jobName required" }] }, 400);
+    }
+    const requestId = c.get("requestId")!;
+    const redis = getQueuehouseRedis(cfg);
+    try {
+      const { jobId, queueName } = await enqueueAuthenticatedJob(redis, cfg, {
+        jobName,
+        payload: envelope.payload,
+        requestId,
+        user: { id: user.id, role: user.role },
+      });
+      return c.json({ jobId, queueName, requestId }, 200);
+    } catch (err) {
+      if (err instanceof ZodError || isZodIssuesError(err)) {
+        const issues = err instanceof ZodError ? err.issues : (err as { issues: unknown }).issues;
+        return c.json({ error: "validation_failed" as const, issues }, 400);
+      }
+      const code = (err as { code?: string }).code;
+      if (code === "unknown_job") {
+        return c.json({ error: "unknown_job" as const }, 400);
+      }
+      if (code === "enqueue_not_allowed") {
+        return c.json({ error: "enqueue_not_allowed" as const }, 403);
+      }
+      throw err;
+    }
+  });
 
   app.doc31("/openapi.json", {
     openapi: "3.1.0",
@@ -120,7 +258,13 @@ export function createApiDocsApp(): OpenAPIHono<{ Variables: ApiVariables }> {
 
 /** @internal Exposed for contract tests. */
 export function getOpenApiDocumentForTests(): object {
-  return createApiDocsApp().getOpenAPIDocument({
+  const cfg = loadConfig({
+    NODE_ENV: process.env.NODE_ENV ?? "test",
+    DATABASE_URL: process.env.DATABASE_URL ?? EXAMPLE_DATABASE_URL,
+    REDIS_URL: process.env.REDIS_URL ?? "redis://127.0.0.1:6379",
+    PORT: process.env.PORT ?? "3000",
+  });
+  return createApiDocsApp(cfg).getOpenAPIDocument({
     openapi: "3.0.0",
     info: { title: "Queuehouse API", version: "0.0.0" },
     servers: [{ url: "/api/v1" }],

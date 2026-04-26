@@ -6,6 +6,12 @@ export {
   exampleSuccessJob,
 } from "./examples";
 export { runExampleJobSync } from "./example-runtime";
+export {
+  bullmqPrefix,
+  queueJobDataSchema,
+  runJobFromQueueData,
+  type QueueJobData,
+} from "./queue-data";
 export { registerExampleJobs } from "./install-examples";
 export {
   clearJobRegistryForTests,

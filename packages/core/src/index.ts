@@ -12,6 +12,7 @@ export {
 
 export {
   JOB_CAPABILITY,
+  bullmqPrefix,
   clearJobRegistryForTests,
   defineJob,
   exampleDeprecatedJob,
@@ -20,12 +21,15 @@ export {
   exampleSuccessJob,
   getRegisteredJob,
   listRegisteredJobs,
+  queueJobDataSchema,
   registerExampleJobs,
   registerJob,
   runExampleJobSync,
+  runJobFromQueueData,
   type DefineJobOptions,
   type JobCapability,
   type JobRedactionMeta,
   type JobRetryDefaults,
+  type QueueJobData,
   type RegisteredJob,
 } from "./jobs";

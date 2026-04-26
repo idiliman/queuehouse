@@ -44,7 +44,7 @@ describe("job registry", () => {
   it("exposes lookup metadata for example.success", () => {
     const j = getRegisteredJob("example.success");
     expect(j).toBeDefined();
-    expect(j!.queue).toBe("queuehouse:example");
+    expect(j!.queue).toBe("queuehouse-example");
     expect(j!.schemaVersion).toBe(1);
     expect(j!.timeoutMs).toBe(30_000);
     expect(j!.retry.maxAttempts).toBe(3);
