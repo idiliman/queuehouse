@@ -67,7 +67,7 @@ Loaded via `loadConfig` in `@queuehouse/core` (API uses stricter production rule
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `DATABASE_URL` | API yes; migrate/bootstrap yes; worker optional | PostgreSQL connection string. |
+| `DATABASE_URL` | API yes; migrate/bootstrap yes; worker yes | PostgreSQL connection string. Workers write audit rows when completing system jobs (e.g. bulk DLQ). |
 | `REDIS_URL` | API and worker | Redis for BullMQ and worker heartbeats. |
 | `SESSION_SECRET` | API in `NODE_ENV=production` | Min 32 characters; known weak values are rejected. |
 | `NODE_ENV` | Recommended | `development` \| `test` \| `production`. |

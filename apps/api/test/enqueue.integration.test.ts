@@ -14,6 +14,7 @@ import type { Hono } from "hono";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import {
+  AUDIT_ACTION,
   bullmqPrefix,
   exampleDlqJob,
   exampleFailJob,
@@ -593,6 +594,19 @@ integrationDescribe("Enqueue through worker (integration)", () => {
       );
       expect(g.status).toBe(404);
     }
+
+    const completeAudit = await prisma.auditLog.findFirst({
+      where: { requestId: "req_bulk_op", action: AUDIT_ACTION.BULK_DLQ_COMPLETE },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(completeAudit).not.toBeNull();
+    expect(completeAudit!.summary as Record<string, unknown>).toMatchObject({
+      action: "remove",
+      requested: 2,
+      executed: 2,
+      skipped: 0,
+      failed: 0,
+    });
   });
 
   it("DLQ: enqueue retry override exhausts configured attempts on example.fail", async () => {

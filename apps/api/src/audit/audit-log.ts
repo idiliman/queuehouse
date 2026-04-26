@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import type { Context } from "hono";
+import { AUDIT_ACTION as SHARED_AUDIT_ACTION } from "@queuehouse/core";
 import { prisma } from "@queuehouse/db";
 import type { ApiVariables } from "../api-types";
 
@@ -17,6 +18,7 @@ export const AUDIT_ACTION = {
   QUEUE_RESUME: "queue.resume",
   JOB_RAW_REVEAL: "job.raw_reveal",
   BULK_DLQ: "job.bulk_dlq",
+  BULK_DLQ_COMPLETE: SHARED_AUDIT_ACTION.BULK_DLQ_COMPLETE,
 } as const;
 
 export const AUDIT_RESULT = {

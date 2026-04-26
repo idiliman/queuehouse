@@ -1,3 +1,2 @@
-import { PrismaClient } from "@prisma/client";
-
-export const prisma = new PrismaClient();
+export { prisma } from "./prisma";
+export { appendAuditLogBestEffort } from "./audit-append";

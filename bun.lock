@@ -55,6 +55,7 @@
       "dependencies": {
         "@queuehouse/bull-ops": "workspace:*",
         "@queuehouse/core": "workspace:*",
+        "@queuehouse/db": "workspace:*",
         "bullmq": "^5.40.0",
         "ioredis": "^5.6.0",
         "prom-client": "^15.1.3",

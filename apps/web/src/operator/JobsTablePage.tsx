@@ -9,6 +9,9 @@ import {
 import { Link } from "react-router-dom";
 import { loadJobsTablePrefs, saveJobsTablePrefs, type JobsTablePrefs } from "./jobsPrefs";
 
+/** Matches `BULK_DLQ_MAX_TARGETS` in API; bulk-dlq rejects larger batches. */
+const BULK_DLQ_MAX = 500;
+
 type JobListItem = {
   jobId: string;
   queueName: string;
@@ -49,11 +52,16 @@ function initialJobsPrefsFromLocation(): JobsTablePrefs {
 }
 
 export type JobsTablePageProps = {
+  role: "VIEWER" | "ADMIN";
   /** Seeds the state filter on first mount (e.g. dedicated `/dlq` route). */
   initialState?: string;
 };
 
-export function JobsTablePage({ initialState }: JobsTablePageProps) {
+function rowKey(j: JobListItem): string {
+  return `${j.queueName}\0${j.jobId}`;
+}
+
+export function JobsTablePage({ role, initialState }: JobsTablePageProps) {
   const [prefs, setPrefs] = useState<JobsTablePrefs>(() => {
     const base = loadJobsTablePrefs();
     if (initialState) return { ...base, state: initialState };
@@ -62,6 +70,10 @@ export function JobsTablePage({ initialState }: JobsTablePageProps) {
   const [rows, setRows] = useState<JobListItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [selectedFailed, setSelectedFailed] = useState<Set<string>>(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   useEffect(() => {
     saveJobsTablePrefs(prefs);
@@ -129,6 +141,77 @@ export function JobsTablePage({ initialState }: JobsTablePageProps) {
     });
     return list;
   }, [rows, prefs.sortKey, prefs.sortDir]);
+
+  const failedOnPage = useMemo(() => sorted.filter((j) => j.state === "failed"), [sorted]);
+  const isAdmin = role === "ADMIN";
+
+  useEffect(() => {
+    setSelectedFailed((prev) => {
+      const allowed = new Set(failedOnPage.map(rowKey));
+      let changed = false;
+      const next = new Set<string>();
+      for (const k of prev) {
+        if (allowed.has(k)) next.add(k);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [failedOnPage]);
+
+  const runBulkDlq = async (action: "retry" | "remove") => {
+    if (selectedFailed.size === 0) return;
+    setBulkError(null);
+    setBulkMessage(null);
+    const targets = [...selectedFailed].map((k) => {
+      const i = k.indexOf("\0");
+      return { queueName: k.slice(0, i), jobId: k.slice(i + 1) };
+    });
+    const msg =
+      action === "retry"
+        ? `Retry ${targets.length} failed job(s) in place? This enqueues a background bulk operation.`
+        : `Remove ${targets.length} failed job(s) from the queue? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
+    setBulkBusy(true);
+    try {
+      const res = await fetch("/api/v1/admin/bulk-dlq", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, targets }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        jobId?: string;
+        queueName?: string;
+        issues?: unknown;
+      };
+      if (res.status === 401) {
+        setBulkError("Session expired. Sign in again.");
+        return;
+      }
+      if (res.status === 403) {
+        setBulkError("Only admins can run bulk DLQ actions.");
+        return;
+      }
+      if (!res.ok) {
+        if (body.error === "validation_failed" && body.issues) {
+          setBulkError(`Validation failed: ${JSON.stringify(body.issues)}`);
+        } else {
+          setBulkError(body.error ?? `Request failed (${res.status}).`);
+        }
+        return;
+      }
+      setBulkMessage(
+        `Bulk ${action} enqueued (system job ${body.jobId} on ${body.queueName}). Audit and job list will update when processing finishes.`,
+      );
+      setSelectedFailed(new Set());
+      void runFetch();
+    } catch {
+      setBulkError("Network error.");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   const cellPad = prefs.density === "compact" ? "0.3rem 0.45rem" : "0.45rem 0.55rem";
   const fontSize = prefs.density === "compact" ? "0.8rem" : "0.88rem";
@@ -277,6 +360,79 @@ export function JobsTablePage({ initialState }: JobsTablePageProps) {
           {loading ? "Loading…" : "Refresh"}
         </button>
       </form>
+      {isAdmin && failedOnPage.length > 0 ? (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.5rem",
+            alignItems: "center",
+            marginBottom: "0.75rem",
+            padding: "0.5rem 0.65rem",
+            background: "#f8f8f8",
+            border: "1px solid #ddd",
+            borderRadius: 4,
+            fontSize: "0.85rem",
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>
+            Bulk DLQ ({selectedFailed.size} selected
+            {selectedFailed.size >= BULK_DLQ_MAX ? `, max ${BULK_DLQ_MAX}` : ""})
+          </span>
+          <button
+            type="button"
+            disabled={bulkBusy}
+            style={inputStyle}
+            onClick={() => {
+              const next = new Set(
+                failedOnPage.slice(0, BULK_DLQ_MAX).map(rowKey),
+              );
+              setSelectedFailed(next);
+            }}
+          >
+            Select failed on page (max {Math.min(BULK_DLQ_MAX, failedOnPage.length)})
+          </button>
+          <button
+            type="button"
+            disabled={bulkBusy}
+            style={inputStyle}
+            onClick={() => setSelectedFailed(new Set())}
+          >
+            Clear selection
+          </button>
+          <button
+            type="button"
+            disabled={bulkBusy || selectedFailed.size === 0 || selectedFailed.size > BULK_DLQ_MAX}
+            style={{ ...inputStyle, background: "#1a4d1a", color: "#fff", borderColor: "#1a4d1a" }}
+            onClick={() => void runBulkDlq("retry")}
+          >
+            {bulkBusy ? "…" : "Bulk retry in place"}
+          </button>
+          <button
+            type="button"
+            disabled={bulkBusy || selectedFailed.size === 0 || selectedFailed.size > BULK_DLQ_MAX}
+            style={{ ...inputStyle, background: "#7a1f1f", color: "#fff", borderColor: "#7a1f1f" }}
+            onClick={() => void runBulkDlq("remove")}
+          >
+            {bulkBusy ? "…" : "Bulk remove"}
+          </button>
+          {failedOnPage.length > BULK_DLQ_MAX ? (
+            <span style={{ color: "#664d00" }}>
+              More than {BULK_DLQ_MAX} failed jobs match this page; select in batches.
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {bulkError ? (
+        <p role="alert" style={{ color: "#b42318", marginTop: 0 }}>
+          {bulkError}
+        </p>
+      ) : null}
+      {bulkMessage ? (
+        <p style={{ color: "#1e5a1e", marginTop: 0 }}>
+          {bulkMessage}
+        </p>
+      ) : null}
       {error ? (
         <p role="alert" style={{ color: "#b42318" }}>
           {error}
@@ -293,6 +449,11 @@ export function JobsTablePage({ initialState }: JobsTablePageProps) {
         >
           <thead>
             <tr style={{ background: "#f4f4f4", textAlign: "left" }}>
+              {isAdmin ? (
+                <th style={{ padding: cellPad, width: "2.25rem" }} title="Select failed jobs for bulk actions">
+                  Bulk
+                </th>
+              ) : null}
               <th style={{ padding: cellPad }}>Queue</th>
               <th style={{ padding: cellPad }}>Job id</th>
               <th style={{ padding: cellPad }}>Job</th>
@@ -306,7 +467,38 @@ export function JobsTablePage({ initialState }: JobsTablePageProps) {
           </thead>
           <tbody>
             {sorted.map((j) => (
-              <tr key={`${j.queueName}\0${j.jobId}`} style={{ borderTop: "1px solid #e8e8e8" }}>
+              <tr key={rowKey(j)} style={{ borderTop: "1px solid #e8e8e8" }}>
+                {isAdmin ? (
+                  <td style={{ padding: cellPad, textAlign: "center" }}>
+                    {j.state === "failed" ? (
+                      <input
+                        type="checkbox"
+                        checked={selectedFailed.has(rowKey(j))}
+                        disabled={bulkBusy}
+                        onChange={() => {
+                          const k = rowKey(j);
+                          setSelectedFailed((prev) => {
+                            const n = new Set(prev);
+                            if (n.has(k)) n.delete(k);
+                            else {
+                              if (n.size >= BULK_DLQ_MAX) {
+                                window.alert(
+                                  `You can select at most ${BULK_DLQ_MAX} jobs per bulk operation.`,
+                                );
+                                return prev;
+                              }
+                              n.add(k);
+                            }
+                            return n;
+                          });
+                        }}
+                        aria-label={`Select failed job ${j.jobId} for bulk action`}
+                      />
+                    ) : (
+                      <span style={{ color: "#ccc" }}>—</span>
+                    )}
+                  </td>
+                ) : null}
                 <td style={{ padding: cellPad, fontFamily: "ui-monospace, monospace" }}>{j.queueName}</td>
                 <td style={{ padding: cellPad, fontFamily: "ui-monospace, monospace", wordBreak: "break-all" }}>
                   {j.jobId}

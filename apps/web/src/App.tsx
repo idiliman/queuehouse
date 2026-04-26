@@ -201,7 +201,7 @@ export function App() {
           element={
             user ? (
               <section style={{ marginTop: "1.5rem" }}>
-                <JobsTablePage />
+                <JobsTablePage role={user.role} />
               </section>
             ) : (
               <Navigate to="/" replace />
@@ -213,7 +213,7 @@ export function App() {
           element={
             user ? (
               <section style={{ marginTop: "1.5rem" }}>
-                <JobsTablePage initialState="failed" />
+                <JobsTablePage role={user.role} initialState="failed" />
               </section>
             ) : (
               <Navigate to="/" replace />

@@ -17,6 +17,8 @@ export {
   type StructuredLogLevel,
 } from "./structured-log";
 
+export { AUDIT_ACTION } from "./audit-actions";
+
 export {
   JOB_CAPABILITY,
   JobUnrecoverableError,
