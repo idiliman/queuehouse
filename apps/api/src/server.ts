@@ -3,10 +3,10 @@ import { Hono } from "hono";
 import { randomBytes } from "node:crypto";
 import { QUEUEHOUSE_VERSION } from "@queuehouse/core";
 import { runReadinessFromEnv } from "./readyz";
+import { v1 } from "./routes/v1";
+import type { ApiVariables } from "./routes/v1";
 
-const app = new Hono<{
-  Variables: { requestId: string };
-}>();
+const app = new Hono<{ Variables: ApiVariables }>();
 
 app.use(async (c, next) => {
   const fromHeader = c.req.header("X-Request-Id")?.trim();
@@ -39,6 +39,8 @@ app.get("/readyz", async (c) => {
     );
   }
 });
+
+app.route("/api/v1", v1);
 
 export default app;
 

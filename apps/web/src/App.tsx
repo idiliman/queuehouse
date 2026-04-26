@@ -1,17 +1,178 @@
+import {
+  type CSSProperties,
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
+
+type Role = "VIEWER" | "ADMIN";
+
+type SessionUser = {
+  id: string;
+  email: string;
+  role: Role;
+};
+
+async function fetchSession(): Promise<SessionUser | null> {
+  const res = await fetch("/api/v1/auth/session", { credentials: "include" });
+  if (res.status === 401) return null;
+  if (!res.ok) throw new Error(`session ${res.status}`);
+  const body = (await res.json()) as { user: SessionUser };
+  return body.user;
+}
+
 export function App() {
+  const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setUser(await fetchSession());
+    } catch {
+      setUser(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const onLogin = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      const res = await fetch("/api/v1/auth/login", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(body.error === "invalid_credentials" ? "Invalid email or password." : "Login failed.");
+        return;
+      }
+      const body = (await res.json()) as { user: SessionUser };
+      setUser(body.user);
+      setPassword("");
+    } catch {
+      setError("Network error.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onLogout = async () => {
+    setBusy(true);
+    try {
+      await fetch("/api/v1/auth/logout", { method: "POST", credentials: "include" });
+      setUser(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (user === undefined) {
+    return (
+      <main style={shell}>
+        <p style={{ color: "#444" }}>Loading session…</p>
+      </main>
+    );
+  }
+
   return (
-    <main
-      style={{
-        fontFamily: "system-ui, sans-serif",
-        padding: "2rem",
-        maxWidth: "48rem",
-        margin: "0 auto",
-      }}
-    >
+    <main style={shell}>
       <h1 style={{ fontSize: "1.75rem", fontWeight: 600 }}>Queuehouse</h1>
-      <p style={{ marginTop: "1rem", color: "#444", lineHeight: 1.5 }}>
-        Operator shell — API, worker, and UI wiring land in upcoming slices.
-      </p>
+
+      {user ? (
+        <section style={{ marginTop: "1.5rem" }}>
+          <p style={{ color: "#444", lineHeight: 1.5 }}>
+            Signed in as <strong>{user.email}</strong> ({user.role.toLowerCase()}).
+          </p>
+          <button
+            type="button"
+            onClick={() => void onLogout()}
+            disabled={busy}
+            style={buttonStyle}
+          >
+            Log out
+          </button>
+        </section>
+      ) : (
+        <section style={{ marginTop: "1.5rem", maxWidth: "22rem" }}>
+          <form onSubmit={(e) => void onLogin(e)} style={{ display: "grid", gap: "0.75rem" }}>
+            <label style={labelStyle}>
+              Email
+              <input
+                type="email"
+                name="email"
+                autoComplete="username"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                style={inputStyle}
+              />
+            </label>
+            <label style={labelStyle}>
+              Password
+              <input
+                type="password"
+                name="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                style={inputStyle}
+              />
+            </label>
+            {error ? (
+              <p role="alert" style={{ color: "#b42318", margin: 0, fontSize: "0.9rem" }}>
+                {error}
+              </p>
+            ) : null}
+            <button type="submit" disabled={busy} style={buttonStyle}>
+              {busy ? "Signing in…" : "Sign in"}
+            </button>
+          </form>
+        </section>
+      )}
     </main>
   );
 }
+
+const shell: CSSProperties = {
+  fontFamily: "system-ui, sans-serif",
+  padding: "2rem",
+  maxWidth: "48rem",
+  margin: "0 auto",
+};
+
+const labelStyle: CSSProperties = {
+  display: "grid",
+  gap: "0.35rem",
+  fontSize: "0.9rem",
+  fontWeight: 500,
+};
+
+const inputStyle: CSSProperties = {
+  padding: "0.5rem 0.65rem",
+  fontSize: "1rem",
+  borderRadius: 6,
+  border: "1px solid #ccc",
+};
+
+const buttonStyle: CSSProperties = {
+  marginTop: "0.25rem",
+  padding: "0.55rem 1rem",
+  fontSize: "1rem",
+  borderRadius: 6,
+  border: "1px solid #222",
+  background: "#111",
+  color: "#fff",
+  cursor: "pointer",
+};
