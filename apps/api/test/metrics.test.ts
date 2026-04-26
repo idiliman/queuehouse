@@ -15,7 +15,16 @@ describe("GET /metrics", () => {
     expect(body).toContain(`version="${QUEUEHOUSE_VERSION}"`);
     expect(body).toContain("queuehouse_build_info");
     expect(body).toContain("queuehouse_queue_jobs");
-    expect(body).toContain('state="failed"');
+    for (const state of [
+      "waiting",
+      "active",
+      "completed",
+      "failed",
+      "delayed",
+      "paused",
+    ] as const) {
+      expect(body).toContain(`state="${state}"`);
+    }
     expect(body).toContain("queuehouse_queue_paused");
     expect(body).toContain("queuehouse_worker_heartbeats");
     expect(body).toContain("queuehouse_workers_subscribed_queue");
